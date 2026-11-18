@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   clampReaderPageIndex,
   getReaderLastPage,
+  getReaderSpreadSize,
+  getReaderSpreadStart,
+  READER_DUAL_PAGE_MIN_WIDTH,
   readerLandingPageIndexAfterPrevChapter,
   readerPageIndexFromProgress,
 } from './readerPageIndex'
@@ -132,5 +135,52 @@ describe('readerLandingPageIndexAfterPrevChapter', () => {
       loading: false,
       totalPages: 7,
     })).toBeNull()
+  })
+})
+
+describe('dual-page spread helpers', () => {
+  it('enables spreadSize=2 only when dualPage is true and width meets minimum', () => {
+    expect(getReaderSpreadSize(false, 1200)).toBe(1)
+    expect(getReaderSpreadSize(true, READER_DUAL_PAGE_MIN_WIDTH - 1)).toBe(1)
+    expect(getReaderSpreadSize(true, READER_DUAL_PAGE_MIN_WIDTH)).toBe(2)
+    expect(getReaderSpreadSize(true, 1440)).toBe(2)
+  })
+
+  it('aligns any page index to the start of its spread', () => {
+    expect(getReaderSpreadStart(0, 2)).toBe(0)
+    expect(getReaderSpreadStart(1, 2)).toBe(0)
+    expect(getReaderSpreadStart(2, 2)).toBe(2)
+    expect(getReaderSpreadStart(3, 2)).toBe(2)
+    expect(getReaderSpreadStart(3, 1)).toBe(3)
+  })
+
+  it('computes last spread start for even and odd page counts', () => {
+    expect(getReaderLastPage(0, 2)).toBe(0)
+    expect(getReaderLastPage(1, 2)).toBe(0)
+    expect(getReaderLastPage(2, 2)).toBe(0)
+    expect(getReaderLastPage(3, 2)).toBe(2)
+    expect(getReaderLastPage(4, 2)).toBe(2)
+    expect(getReaderLastPage(5, 2)).toBe(4)
+  })
+
+  it('clamps and aligns page index to spread start', () => {
+    expect(clampReaderPageIndex(1, 5, 2)).toBe(0)
+    expect(clampReaderPageIndex(3, 5, 2)).toBe(2)
+    expect(clampReaderPageIndex(9, 4, 2)).toBe(2)
+    expect(clampReaderPageIndex(-2, 4, 2)).toBe(0)
+  })
+
+  it('maps progress to spread start and lands on last spread when stepping back a chapter', () => {
+    expect(readerPageIndexFromProgress(0, 5, 2)).toBe(0)
+    expect(readerPageIndexFromProgress(0.5, 5, 2)).toBe(2)
+    expect(readerPageIndexFromProgress(1, 5, 2)).toBe(4)
+    expect(readerPageIndexFromProgress(1, 4, 2)).toBe(2)
+    expect(readerLandingPageIndexAfterPrevChapter({
+      intentIndex: 2,
+      currentIndex: 2,
+      loading: false,
+      totalPages: 4,
+      spreadSize: 2,
+    })).toBe(2)
   })
 })

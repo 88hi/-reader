@@ -217,6 +217,7 @@
               ref="chapterTextRef"
               class="horizontal-pages"
               :class="{
+                'dual-page-mode': isDualPageActive,
                 'page-selection-unlocked': mouseSelectionUnlocked,
                 'page-turn-in-progress': horizontalPageTurnInProgress,
                 'page-selection-hidden': !mouseSelectionUnlocked,
@@ -489,6 +490,7 @@ import {
 } from '../utils/readerPaging'
 import {
   clampReaderPageIndex,
+  getReaderSpreadStart,
   readerLandingPageIndexAfterPrevChapter,
   readerPageIndexFromProgress,
 } from '../utils/readerPageIndex'
@@ -1237,8 +1239,8 @@ function scheduleHorizontalRebuild() {
     //
     // 窗口尺寸变化会改变行宽与每页容量, 页边界必须重算 —— 沿用旧分页会出现半页
     // 错位。与排版参数变化一致: 按**阅读进度比例**映射位置, 而不是跳回章首。
-    const previousMax = Math.max(0, horizontalPages.value.length - 1)
-    const progress = previousMax > 0 ? horizontalPageIndex.value / previousMax : 0
+    const previousMax = Math.max(0, horizontalLastPageStart.value)
+    const progress = previousMax > 0 ? Math.min(1, horizontalPageIndex.value / previousMax) : 0
     void rebuildHorizontalPages().then(() => {
       if (!isHorizontalPageMode.value) return
       // 与排版参数 watcher 同源: 未兑现的跨章回退落位优先(它才是用户此刻的意图),
@@ -1248,6 +1250,7 @@ function scheduleHorizontalRebuild() {
       horizontalPageIndex.value = readerPageIndexFromProgress(
         progress,
         horizontalPages.value.length,
+        horizontalSpreadSize.value,
       )
       syncHorizontalPageState()
     })
@@ -1595,6 +1598,8 @@ const {
   horizontalTextWidth,
   horizontalPages,
   horizontalLastPageStart,
+  isDualPageActive,
+  horizontalSpreadSize,
   isHorizontalPagesStale,
   rebuildHorizontalPages,
   updateHorizontalMetrics,
@@ -1610,6 +1615,7 @@ const {
     pageVerticalPadding: config.value.pageVerticalPadding,
     paragraphSpacing: config.value.paragraphSpacing,
     firstLineIndent: config.value.firstLineIndent,
+    dualPage: config.value.dualPage,
   })),
   currentFontFamily,
   formattedContent,
@@ -1624,8 +1630,11 @@ const {
  *  长章节下远超预算。而一次翻页真正要动起来的只有当前页与它的邻居, 其余页都
  *  在裁剪区外, 交给浏览器按普通内容处理即可。 */
 function horizontalPageWillChange(pageIndex: number) {
-  const distance = Math.abs(pageIndex - horizontalPageIndex.value)
-  return distance <= 1 ? 'transform' : 'auto'
+  const spread = horizontalSpreadSize.value
+  const currentStart = getReaderSpreadStart(horizontalPageIndex.value, spread)
+  return pageIndex >= currentStart - spread && pageIndex <= currentStart + spread * 2 - 1
+    ? 'transform'
+    : 'auto'
 }
 
 /** 第 `pageIndex` 页在当前页索引下的位移。
@@ -1637,9 +1646,10 @@ function horizontalPageWillChange(pageIndex: number) {
  *  位图, 它不属于 DOM(无法选中), 改窗口大小或重进阅读页重建层后才消失。
  *  现在布局宽度恒为一页, 每页各自是一个独立的小层, 不存在需要分块的超宽层。 */
 function horizontalPageTransform(pageIndex: number) {
-  // 一屏恰好一页: 让第 pageIndex 页落到视口, 它要移动 (当前页 - 自己) 个屏宽。
+  // 单页模式步进 = 屏宽, 双页模式步进 = 半屏宽(左页 0, 右页 +step)。
   const step = Math.max(1, horizontalPageStep.value)
-  const offset = (pageIndex - horizontalPageIndex.value) * step
+  const currentStart = getReaderSpreadStart(horizontalPageIndex.value, horizontalSpreadSize.value)
+  const offset = (pageIndex - currentStart) * step
   return `translate3d(${offset}px, 0, 0)`
 }
 /** 一次跨过很多页时, 给新画面的淡入时长。跨章不做长距离滑动, 只留一个短促分界。 */
@@ -1713,7 +1723,7 @@ function beginHorizontalJump(fade: boolean) {
 watch(horizontalPageIndex, (next, previous) => {
   if (!isHorizontalPageMode.value) return
   clearSelectionBeforePageTurn()
-  if (Math.abs(next - previous) <= 1) return
+  if (Math.abs(next - previous) <= horizontalSpreadSize.value) return
   beginHorizontalJump(false)
   // flush 必须是 sync: 置位要早于任何一次渲染读取 horizontalPageTransitionDuration,
   // 否则这次跳变已经按旧时长(«动画时长», 默认 300ms)绘制出去, 大跨度滑动照样发生。
@@ -1785,7 +1795,11 @@ async function locateSearchMatch(
   const pages = Array.from(container.querySelectorAll('.horizontal-page')) as HTMLElement[]
   const pageIndex = pages.indexOf(page)
   if (pageIndex < 0) return
-  horizontalPageIndex.value = clampReaderPageIndex(pageIndex, pages.length)
+  horizontalPageIndex.value = clampReaderPageIndex(
+    pageIndex,
+    pages.length,
+    horizontalSpreadSize.value,
+  )
   container.scrollTo({ left: 0, behavior: 'auto' })
   syncHorizontalPageState()
 }
@@ -1818,15 +1832,16 @@ const {
   scrollContainerRef,
 )
 
-/** 是否该预加载下一章: 到达倒数第二页就算到(与纵向滚动模式的「提前一屏」一致)。 */
+/** 是否该预加载下一章: 到达倒数第二屏就算到(与纵向滚动模式的「提前一屏」一致)。 */
 function shouldPreloadNextChapter() {
   if (!config.value.enablePreload) return false
-  return horizontalPageIndex.value >= horizontalLastPageStart.value - 1
+  return horizontalPageIndex.value >= horizontalLastPageStart.value - horizontalSpreadSize.value
 }
 
 function syncHorizontalPageState() {
-  const maxPage = Math.max(0, horizontalPages.value.length - 1)
-  const progress = maxPage <= 0 ? 1 : horizontalPageIndex.value / maxPage
+  const maxPage = Math.max(0, horizontalLastPageStart.value)
+  const currentStart = getReaderSpreadStart(horizontalPageIndex.value, horizontalSpreadSize.value)
+  const progress = maxPage <= 0 ? 1 : Math.min(1, currentStart / maxPage)
   store.setChapterScrollProgress(progress)
   if (shouldPreloadNextChapter()) {
     store.preloadAroundChapter(store.currentIndex)
@@ -1844,13 +1859,14 @@ function pageForward() {
   }
   clearSelectionBeforePageTurn()
   if (isHorizontalPageMode.value) {
-    // 一屏恰好一页, 所以步进量是 1 页。
+    const spread = horizontalSpreadSize.value
+    const currentStart = getReaderSpreadStart(horizontalPageIndex.value, spread)
     const lastPage = horizontalLastPageStart.value
-    if (horizontalPageIndex.value >= lastPage) {
+    if (currentStart >= lastPage) {
       nextChapter()
       return
     }
-    horizontalPageIndex.value = Math.min(lastPage, horizontalPageIndex.value + 1)
+    horizontalPageIndex.value = Math.min(lastPage, currentStart + spread)
     container.scrollTo({ left: 0, behavior: 'auto' })
     syncHorizontalPageState()
     clearAfterPageTurn()
@@ -1873,7 +1889,9 @@ function pageBackward() {
   }
   clearSelectionBeforePageTurn()
   if (isHorizontalPageMode.value) {
-    if (horizontalPageIndex.value <= 0) {
+    const spread = horizontalSpreadSize.value
+    const currentStart = getReaderSpreadStart(horizontalPageIndex.value, spread)
+    if (currentStart <= 0) {
       // 跨到上一章时要把落点定在**上一章末页**。不标记的话 prevChapter 会走
       // scrollToTop 把索引清 0 —— 新章第 0 页是标题页, 于是往前翻看起来像没动
       // (用户反馈的正是这个: 翻上一页还是标题页), 再翻一次又进了更上一章。
@@ -1881,7 +1899,7 @@ function pageBackward() {
       prevChapter()
       return
     }
-    horizontalPageIndex.value = Math.max(0, horizontalPageIndex.value - 1)
+    horizontalPageIndex.value = Math.max(0, currentStart - spread)
     container.scrollTo({ left: 0, behavior: 'auto' })
     syncHorizontalPageState()
     clearAfterPageTurn()
@@ -1936,6 +1954,7 @@ function applyPendingPrevChapterLanding(): boolean {
     currentIndex: store.currentIndex,
     loading: store.loading,
     totalPages: horizontalPages.value.length,
+    spreadSize: horizontalSpreadSize.value,
   })
   // 还不能兑现(正文没到/页数还是旧章的): 保留意图, 让调用方继续走默认逻辑。
   if (landing === null) return false
@@ -2533,7 +2552,11 @@ async function restoreLegadoReadingPosition() {
     const pageIndex = page ? pages.indexOf(page) : -1
     if (pageIndex < 0 || !pages.length) return false
     // 一屏恰好一页: 目标页索引直接就是它在页面列表里的下标。
-    horizontalPageIndex.value = clampReaderPageIndex(pageIndex, pages.length)
+    horizontalPageIndex.value = clampReaderPageIndex(
+      pageIndex,
+      pages.length,
+      horizontalSpreadSize.value,
+    )
     pendingLegadoPageRestore.value = null
     legadoPositionRestoreAttempts = 0
     legadoPositionRestoreSettling = false
@@ -2719,6 +2742,7 @@ function restoreReadingPositionInternal(saved: SavedReadingPosition | null, fina
     const pageIndex = readerPageIndexFromProgress(
       Math.max(0, Math.min(1, saved.progress || 0)),
       horizontalPages.value.length,
+      horizontalSpreadSize.value,
     )
     horizontalPageIndex.value = pageIndex
     // 索引与容器的 scrollLeft 无关, 但仍归零: 旧实现留下的非零 scrollLeft
@@ -3357,8 +3381,9 @@ function handleScroll() {
     const maxScroll = Math.max(1, container.scrollHeight - container.clientHeight)
     const progress = isHorizontalPageMode.value
       ? (() => {
-          const maxPage = Math.max(0, horizontalPages.value.length - 1)
-          return maxPage <= 0 ? 1 : horizontalPageIndex.value / maxPage
+          const maxPage = Math.max(0, horizontalLastPageStart.value)
+          const currentStart = getReaderSpreadStart(horizontalPageIndex.value, horizontalSpreadSize.value)
+          return maxPage <= 0 ? 1 : Math.min(1, currentStart / maxPage)
         })()
       : (container.scrollHeight <= container.clientHeight ? 1 : container.scrollTop / maxScroll)
     store.setChapterScrollProgress(progress)
@@ -3367,6 +3392,7 @@ function handleScroll() {
       horizontalPageIndex.value = clampReaderPageIndex(
         horizontalPageIndex.value,
         horizontalPages.value.length,
+        horizontalSpreadSize.value,
       )
       if (container.scrollLeft !== 0) {
         container.scrollTo({ left: 0, behavior: 'auto' })
@@ -4204,11 +4230,20 @@ watch(() => store.currentIndex, () => {
 // 按**阅读进度比例**把位置映射到新分页, 而不是一律回到第一页 —— 否则在设置里
 // 拖一下字号或页宽就会跳回本章开头, 还会把这个 0 进度写回书架。
 watch(
-  [() => config.value.fontSize, () => config.value.fontWeight, () => config.value.lineHeight, () => config.value.paragraphSpacing, () => config.value.firstLineIndent, () => config.value.pageWidth, () => config.value.pageVerticalPadding],
+  [
+    () => config.value.fontSize,
+    () => config.value.fontWeight,
+    () => config.value.lineHeight,
+    () => config.value.paragraphSpacing,
+    () => config.value.firstLineIndent,
+    () => config.value.pageWidth,
+    () => config.value.pageVerticalPadding,
+    () => config.value.dualPage,
+  ],
   () => {
     if (!isHorizontalPageMode.value) return
-    const previousMax = Math.max(0, horizontalPages.value.length - 1)
-    const progress = previousMax > 0 ? horizontalPageIndex.value / previousMax : 0
+    const previousMax = Math.max(0, horizontalLastPageStart.value)
+    const progress = previousMax > 0 ? Math.min(1, horizontalPageIndex.value / previousMax) : 0
     void rebuildHorizontalPages().then(() => {
       if (!isHorizontalPageMode.value) return
       // 未兑现的跨章回退落位优先: 这次重建可能就是它唯一的机会(用户恰好在"进上一章"
@@ -4222,6 +4257,7 @@ watch(
       horizontalPageIndex.value = readerPageIndexFromProgress(
         progress,
         horizontalPages.value.length,
+        horizontalSpreadSize.value,
       )
       syncHorizontalPageState()
     })
@@ -4664,28 +4700,29 @@ watch(
   margin: 0;
   height: 100%;
   min-height: 100%;
-  /* 分页模式下宽度恒为一页(不再是 max-content 的超宽横带)。 */
-  width: var(--reader-page-step);
-  min-width: var(--reader-page-step);
+  /* 视口容器恒占满滚动容器宽度；单页宽度由 .horizontal-page 的 --reader-page-step 控制
+     (单页模式下为 100%，双页模式下为 50%)。 */
+  width: 100%;
+  min-width: 100%;
   padding: 0;
 }
 
 .horizontal-page-layout {
-  width: var(--reader-page-step);
-  min-width: var(--reader-page-step);
+  width: 100%;
+  min-width: 100%;
   height: 100%;
 }
 
 .horizontal-content-page {
-  width: var(--reader-page-step);
-  min-width: var(--reader-page-step);
+  width: 100%;
+  min-width: 100%;
   height: 100%;
   min-height: 100%;
   padding: 0;
   box-sizing: border-box;
 }
 
-/* 分页视口: 尺寸恒为一页, 且**裁剪**掉溢出的一页。
+/* 分页视口: 尺寸恒为一屏, 且**裁剪**掉溢出的页。
    裁剪不只是为了视觉 —— 它同时把这一层的绘制/光栅边界钉在「一屏」大小。
    早先这里是 `display:flex; width:max-content`, 整章所有页横向排成一条超宽横带
    (10 页 × 1174 = 14675px), 再由父层整体 translate3d 平移; WebView2 对这么大的
@@ -4697,6 +4734,18 @@ watch(
   height: 100%;
   min-height: 100%;
   overflow: hidden;
+}
+
+.horizontal-pages.dual-page-mode::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: var(--reader-page-vertical-padding);
+  bottom: var(--reader-page-vertical-padding);
+  width: 1px;
+  background: currentColor;
+  opacity: 0.1;
+  pointer-events: none;
 }
 
 .horizontal-pages.page-selection-hidden .horizontal-page,

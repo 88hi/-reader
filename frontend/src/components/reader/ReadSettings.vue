@@ -424,6 +424,20 @@
         </div>
         <div class="group-card">
           <div class="setting-row">
+            <label>双页显示</label>
+            <div class="switch-line">
+              <button
+                class="switch"
+                role="switch"
+                :aria-checked="config.dualPage"
+                :class="{ on: config.dualPage }"
+                @click="store.updateConfig('dualPage', !config.dualPage)"
+              ></button>
+              <span class="switch-note">宽屏下左右并排显示两页</span>
+            </div>
+          </div>
+
+          <div class="setting-row">
             <label>页面宽度</label>
             <div class="range-field">
               <div class="range-track" :style="{ '--fill': pageWidthPercent + '%' }">

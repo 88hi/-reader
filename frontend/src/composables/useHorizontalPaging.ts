@@ -2,6 +2,11 @@ import { computed, nextTick, ref } from 'vue'
 import type { ComputedRef, Ref } from 'vue'
 import type { useReaderStore } from '../stores/reader'
 import { getReaderTextWidth } from '../utils/readerTextWidth'
+import {
+  clampReaderPageIndex,
+  getReaderLastPage,
+  getReaderSpreadSize,
+} from '../utils/readerPageIndex'
 import { READER_PAGE_VERTICAL_PADDING_MAX } from '../stores/reader'
 import { parseReaderParagraph } from '../utils/readerParagraphRange'
 
@@ -345,6 +350,7 @@ export function useHorizontalPaging(
     pageVerticalPadding: number
     paragraphSpacing: number
     firstLineIndent: boolean
+    dualPage: boolean
   }>,
   currentFontFamily: ComputedRef<string>,
   formattedContent: ComputedRef<string>,
@@ -352,9 +358,12 @@ export function useHorizontalPaging(
   scrollContainerRef: Ref<HTMLElement | undefined>,
 ) {
   const horizontalPageIndex = ref(0)
-  /** **屏宽**(= 容器宽)。一屏恰好一页, 翻页位移 = 索引 × 屏宽。
+  /** **单页槽宽**(= 单页模式下为容器宽, 双页模式下为容器宽 / 2)。
    *  注意这不是行宽: 行宽由「页面宽度」设置在页内单独控制(见 `horizontalTextWidth`)。 */
   const horizontalPageStep = ref(1)
+  /** 当前是否处于双页并排显示状态(开启双页且容器宽度足够)。 */
+  const isDualPageActive = ref(false)
+  const horizontalSpreadSize = computed<1 | 2>(() => (isDualPageActive.value ? 2 : 1))
   /** 一页内正文列的宽度(行宽), 由设置里的「页面宽度」决定。 */
   const horizontalTextWidth = ref(0)
   const horizontalPageStepStyle = computed(() => `${Math.max(1, horizontalPageStep.value)}px`)
@@ -367,9 +376,9 @@ export function useHorizontalPaging(
    *  会短暂露出底部残留，必须在重建前撤下。 */
   let pagedLayoutSignature = ''
 
-  /** 最后一页的索引。一屏一页, 所以末页索引就是页数 - 1。 */
+  /** 最后一屏的起始页索引(单页为 页数 - 1, 双页为最后一屏的左页索引)。 */
   const horizontalLastPageStart = computed(() =>
-    Math.max(0, horizontalPages.value.length - 1),
+    getReaderLastPage(horizontalPages.value.length, horizontalSpreadSize.value),
   )
 
   function escapeHtml(input: string) {
@@ -550,10 +559,13 @@ export function useHorizontalPaging(
     const container = scrollContainerRef.value
     if (!container || !isHorizontalPageMode.value) return
     const containerWidth = Math.max(1, container.clientWidth)
-    horizontalPageStep.value = containerWidth
-    // 可用宽度 = 屏宽扣掉页容器左右 padding。与 .horizontal-page 的 padding 一致,
+    const spreadSize = getReaderSpreadSize(Boolean(config.value.dualPage), containerWidth)
+    isDualPageActive.value = spreadSize === 2
+    const slotWidth = spreadSize === 2 ? containerWidth / 2 : containerWidth
+    horizontalPageStep.value = slotWidth
+    // 可用宽度 = 单页槽宽扣掉页容器左右 padding。与 .horizontal-page 的 padding 一致,
     // 也必须是测量正文时用的同一个值, 否则分页与实际排版会不一致。
-    const availableWidth = Math.max(1, containerWidth - HORIZONTAL_PAGE_SIDE_PADDING * 2)
+    const availableWidth = Math.max(1, slotWidth - HORIZONTAL_PAGE_SIDE_PADDING * 2)
     horizontalTextWidth.value = getReaderTextWidth(availableWidth, config.value.pageWidth)
   }
 
@@ -602,6 +614,7 @@ export function useHorizontalPaging(
     const layoutSignature = [
       innerWidth,
       pageHeight,
+      horizontalSpreadSize.value,
       config.value.fontSize,
       config.value.fontWeight,
       config.value.lineHeight,
@@ -808,10 +821,11 @@ export function useHorizontalPaging(
     horizontalPages.value = mergedPages
     pagedContentSnapshot = contentSnapshot
     pagedLayoutSignature = layoutSignature
-    // 重建后页数可能变少: 夹进有效范围, 否则索引会指向不存在的页(画面停在空白处)。
-    horizontalPageIndex.value = Math.max(
-      0,
-      Math.min(horizontalLastPageStart.value, horizontalPageIndex.value),
+    // 重建后页数可能变少: 夹进有效范围并对齐到所属屏起始索引。
+    horizontalPageIndex.value = clampReaderPageIndex(
+      horizontalPageIndex.value,
+      mergedPages.length,
+      horizontalSpreadSize.value,
     )
 
     container.scrollTo({ left: 0, behavior: 'auto' })
@@ -822,9 +836,10 @@ export function useHorizontalPaging(
     const container = scrollContainerRef.value
     if (!container || !isHorizontalPageMode.value || touchMoving) return
     updateHorizontalMetrics()
-    horizontalPageIndex.value = Math.max(
-      0,
-      Math.min(horizontalLastPageStart.value, horizontalPageIndex.value),
+    horizontalPageIndex.value = clampReaderPageIndex(
+      horizontalPageIndex.value,
+      horizontalPages.value.length,
+      horizontalSpreadSize.value,
     )
     if (container.scrollLeft !== 0) {
       container.scrollTo({ left: 0, behavior: 'auto' })
@@ -851,6 +866,8 @@ export function useHorizontalPaging(
     horizontalTextWidth,
     horizontalPages,
     horizontalLastPageStart,
+    isDualPageActive,
+    horizontalSpreadSize,
     isHorizontalPagesStale,
     rebuildHorizontalPages,
     updateHorizontalMetrics,
