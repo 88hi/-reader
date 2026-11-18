@@ -9,20 +9,44 @@
  *  800px, 一屏会同时露出当前页与下一页的左半, 右侧还留一大片空白。
  */
 
-/** 末页索引(页数 - 1)。 */
-export function getReaderLastPage(totalPages: number): number {
-  const total = Number.isFinite(totalPages) ? Math.floor(totalPages) : 0
-  return Math.max(0, total - 1)
+/** 启用双页显示所需的最小阅读容器宽度(像素)。窄屏下自动回落为单页, 避免两列过窄难以阅读。 */
+export const READER_DUAL_PAGE_MIN_WIDTH = 560
+
+/** 当前一屏并排显示的页数(单页 1 / 双页 2)。 */
+export function getReaderSpreadSize(dualPage: boolean, containerWidth: number): 1 | 2 {
+  if (!dualPage) return 1
+  if (!Number.isFinite(containerWidth) || containerWidth < READER_DUAL_PAGE_MIN_WIDTH) return 1
+  return 2
 }
 
-/** 把页索引夹进 `[0, 末页索引]`。
+/** 把任意页索引对齐到所属屏(spread)的起始页索引。 */
+export function getReaderSpreadStart(index: number, spreadSize: 1 | 2 = 1): number {
+  const raw = Number.isFinite(index) ? Math.max(0, Math.floor(index)) : 0
+  if (spreadSize <= 1) return raw
+  return Math.floor(raw / spreadSize) * spreadSize
+}
+
+/** 末页起始索引(单页为 页数 - 1, 双页为最后一屏的左页索引)。 */
+export function getReaderLastPage(totalPages: number, spreadSize: 1 | 2 = 1): number {
+  const total = Number.isFinite(totalPages) ? Math.floor(totalPages) : 0
+  if (total <= 0) return 0
+  if (spreadSize <= 1) return total - 1
+  return Math.floor((total - 1) / spreadSize) * spreadSize
+}
+
+/** 把页索引夹进 `[0, 末页起始索引]` 并对齐到所属屏起始索引。
  *
  *  重建分页、滚动对齐、位置恢复都要过这一步: 页数变少后旧索引会指向不存在的页,
  *  画面会停在空白处。 */
-export function clampReaderPageIndex(index: number, totalPages: number): number {
-  const lastPage = getReaderLastPage(totalPages)
+export function clampReaderPageIndex(
+  index: number,
+  totalPages: number,
+  spreadSize: 1 | 2 = 1,
+): number {
+  const lastPage = getReaderLastPage(totalPages, spreadSize)
   const raw = Number.isFinite(index) ? Math.floor(index) : 0
-  return Math.max(0, Math.min(lastPage, raw))
+  const clamped = Math.max(0, Math.min(lastPage, raw))
+  return getReaderSpreadStart(clamped, spreadSize)
 }
 
 /** 把阅读进度比例(0–1)换算成页索引。
@@ -31,11 +55,15 @@ export function clampReaderPageIndex(index: number, totalPages: number): number 
 export function readerPageIndexFromProgress(
   progress: number,
   totalPages: number,
+  spreadSize: 1 | 2 = 1,
 ): number {
   const total = Number.isFinite(totalPages) ? Math.floor(totalPages) : 0
   if (total <= 0) return 0
   const safeProgress = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0
-  return clampReaderPageIndex(Math.round(safeProgress * (total - 1)), total)
+  const lastPage = getReaderLastPage(total, spreadSize)
+  if (lastPage <= 0) return 0
+  const target = Math.round((safeProgress * lastPage) / spreadSize) * spreadSize
+  return clampReaderPageIndex(target, total, spreadSize)
 }
 
 /** 「左右分页往前翻跨章」的落位页索引; 不该落位时返回 null。
@@ -52,9 +80,10 @@ export function readerLandingPageIndexAfterPrevChapter(options: {
   currentIndex: number
   loading: boolean
   totalPages: number
+  spreadSize?: 1 | 2
 }): number | null {
-  const { intentIndex, currentIndex, loading, totalPages } = options
+  const { intentIndex, currentIndex, loading, totalPages, spreadSize = 1 } = options
   if (intentIndex === null || loading) return null
   if (intentIndex !== currentIndex) return null
-  return getReaderLastPage(totalPages)
+  return getReaderLastPage(totalPages, spreadSize)
 }

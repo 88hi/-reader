@@ -138,6 +138,8 @@ export interface ReadConfig {
   pageWidth: number
   /** 左右分页时每页正文的上下留白, 像素。 */
   pageVerticalPadding: number
+  /** 左右分页时是否启用内容双页并排显示（宽屏下生效）。 */
+  dualPage: boolean
   readMethod: '上下滑动' | '左右翻页' | '上下滚动' | '上下滚动2'
   animateDuration: number
   /** 自动阅读滚动速度, 像素/秒。 */
@@ -198,6 +200,7 @@ const defaultConfig: ReadConfig = {
   fontColor: '',
   pageWidth: 800,
   pageVerticalPadding: 24,
+  dualPage: false,
   readMethod: '上下滑动',
   animateDuration: 300,
   autoScrollSpeed: 30,
@@ -302,6 +305,9 @@ function loadConfig(): ReadConfig {
               Math.max(0, Math.round(savedConfig.pageVerticalPadding)),
             )
           : defaultConfig.pageVerticalPadding,
+        dualPage: typeof savedConfig.dualPage === 'boolean'
+          ? savedConfig.dualPage
+          : defaultConfig.dualPage,
         autoScrollSpeed: typeof savedConfig.autoScrollSpeed === 'number' && savedConfig.autoScrollSpeed > 0
           ? Math.min(500, Math.max(2, Math.round(savedConfig.autoScrollSpeed)))
           : Math.min(500, Math.max(2, Math.round(legacyAutoScrollSpeed))),
