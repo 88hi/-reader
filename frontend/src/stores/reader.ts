@@ -1568,7 +1568,17 @@ export const useReaderStore = defineStore('reader', () => {
       chapterScrollProgress: chapterScrollProgress.value,
       updatedAt: Date.now(),
     }
-    localStorage.setItem(READER_SESSION_KEY, JSON.stringify(payload))
+    try {
+      localStorage.setItem(READER_SESSION_KEY, JSON.stringify(payload))
+    } catch {
+      // 大型本地书（如上万章 TXT）目录序列化可能超出 localStorage 配额，
+      // 不能因此中断阅读：清理旧快照以免占用配额，阅读进度仍由下方轻量快照保存。
+      try {
+        localStorage.removeItem(READER_SESSION_KEY)
+      } catch {
+        // Ignore storage cleanup errors.
+      }
+    }
     // 全量快照已包含最新进度, 轻量副本同步一次即可 —— 否则下次恢复
     // 可能读到比全量更旧的进度(两次调用之间存在插值中的中间值)。
     saveReaderProgress()
@@ -1739,7 +1749,11 @@ export const useReaderStore = defineStore('reader', () => {
   function persistReadChapterHistory(currentBook?: Book | null) {
     const storageKey = getReadHistoryStorageKey(currentBook)
     if (!storageKey) return
-    localStorage.setItem(storageKey, JSON.stringify(Array.from(readChapterKeys.value)))
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(Array.from(readChapterKeys.value)))
+    } catch {
+      // 存储配额不足时跳过已读标记持久化，避免中断阅读。
+    }
   }
 
   function markChapterAsRead(index: number) {
@@ -3861,7 +3875,11 @@ export const useReaderStore = defineStore('reader', () => {
     if (book.value) {
       saveRecentReadBook(book.value)
     }
-    localStorage.setItem('reader-currentIndex', String(index))
+    try {
+      localStorage.setItem('reader-currentIndex', String(index))
+    } catch {
+      // Ignore storage quota errors.
+    }
     // 这里**只写轻量进度**，不能写全量快照。
     //
     // 全量快照包含整个目录（`chapters`），一本 3000 章的书序列化出来有几 MB，

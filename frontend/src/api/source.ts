@@ -86,12 +86,15 @@ export function unpinBookSource(bookSourceUrl: string) {
   return post<{ success: boolean }>('/unpinBookSource', { bookSourceUrl }).then((r) => r.data)
 }
 
+export type BookSourceTestMode = 'all' | 'search' | 'toc'
+
 export function testBookSources(params: {
   bookSourceUrls?: string[]
   keyword?: string
   markInvalid?: boolean
   concurrent?: number
   taskId?: string
+  mode?: BookSourceTestMode
 }) {
   if ((params.bookSourceUrls?.length || 0) > MAX_SOURCE_TEST_BATCH_SIZE) {
     throw new Error(`单次最多测试 ${MAX_SOURCE_TEST_BATCH_SIZE} 个书源`)

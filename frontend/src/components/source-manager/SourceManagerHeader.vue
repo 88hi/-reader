@@ -5,7 +5,7 @@
       <p>
         共 {{ total }} 个 · 启用 {{ enabled }} 个 · 当前筛选 {{ filtered }} 个
         <span v-if="selected > 0"> · 已选 {{ selected }} 个</span>
-        <span v-if="testing"> · 测试进度 {{ testCompleted }} / {{ testTotal }}（{{ testPercent }}%）</span>
+        <span v-if="testing"> · {{ testModeLabel }}进度 {{ testCompleted }} / {{ testTotal }}（{{ testPercent }}%）</span>
         <span v-if="stopping" class="stopping-hint"> · 正在中止…</span>
       </p>
     </div>
@@ -23,12 +23,30 @@
       <button class="action-btn" type="button" @click="$emit('export')">导出</button>
       <button
         class="action-btn"
-        :class="{ danger: testing }"
-        :disabled="(!testing && total === 0) || stopping"
+        :class="{ danger: testing && activeMode === 'all' }"
+        :disabled="(testing ? activeMode !== 'all' : total === 0) || stopping"
         type="button"
-        @click="testing ? $emit('cancel-test') : $emit('test-sources')"
+        @click="testing && activeMode === 'all' ? $emit('cancel-test') : $emit('test-sources', 'all')"
       >
-        {{ stopping ? '正在中止…' : (testing ? '中止测试' : '测试书源') }}
+        {{ testing && activeMode === 'all' ? (stopping ? '正在中止…' : '中止测试') : '测试书源' }}
+      </button>
+      <button
+        class="action-btn"
+        :class="{ danger: testing && activeMode === 'search' }"
+        :disabled="(testing ? activeMode !== 'search' : total === 0) || stopping"
+        type="button"
+        @click="testing && activeMode === 'search' ? $emit('cancel-test') : $emit('test-sources', 'search')"
+      >
+        {{ testing && activeMode === 'search' ? (stopping ? '正在中止…' : '中止测试') : '测试搜索' }}
+      </button>
+      <button
+        class="action-btn"
+        :class="{ danger: testing && activeMode === 'toc' }"
+        :disabled="(testing ? activeMode !== 'toc' : total === 0) || stopping"
+        type="button"
+        @click="testing && activeMode === 'toc' ? $emit('cancel-test') : $emit('test-sources', 'toc')"
+      >
+        {{ testing && activeMode === 'toc' ? (stopping ? '正在中止…' : '中止测试') : '测试目录' }}
       </button>
       <button
         class="action-btn danger"
@@ -50,6 +68,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import type { BookSourceTestMode } from '../../api/source'
 
 const props = defineProps<{
   total: number
@@ -58,12 +77,20 @@ const props = defineProps<{
   selected: number
   loading: boolean
   testing: boolean
+  testMode?: BookSourceTestMode
   testCompleted: number
   testTotal: number
   invalidCount: number
   /** 已发出中止请求、还在等后端收尾(写回已完成的结果)。 */
   stopping?: boolean
 }>()
+
+const activeMode = computed<BookSourceTestMode>(() => props.testMode ?? 'all')
+const testModeLabel = computed(() => {
+  if (activeMode.value === 'search') return '测试搜索'
+  if (activeMode.value === 'toc') return '测试目录'
+  return '测试'
+})
 
 const testPercent = computed(() => (
   props.testTotal > 0 ? Math.round((props.testCompleted / props.testTotal) * 100) : 0
@@ -74,7 +101,7 @@ defineEmits<{
   'import-local': []
   'open-subscriptions': []
   export: []
-  'test-sources': []
+  'test-sources': [mode: BookSourceTestMode]
   'cancel-test': []
   'delete-invalid': []
   create: []

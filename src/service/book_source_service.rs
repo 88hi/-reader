@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use tokio::fs;
 
 pub const INVALID_BOOK_SOURCE_GROUP: &str = "失效";
+pub const SEARCH_INVALID_BOOK_SOURCE_GROUP: &str = "搜索失效";
+pub const TOC_INVALID_BOOK_SOURCE_GROUP: &str = "目录失效";
 
 #[derive(Clone)]
 pub struct BookSourceService {
@@ -225,26 +227,32 @@ pub fn book_source_has_group(source: &BookSource, target: &str) -> bool {
         .any(|group| group == target)
 }
 
-pub fn set_invalid_book_source_group(source: &mut BookSource, invalid: bool) -> bool {
+pub fn set_book_source_group_flag(
+    source: &mut BookSource,
+    target_group: &str,
+    present: bool,
+) -> bool {
+    let target = target_group.trim();
+    if target.is_empty() {
+        return false;
+    }
     let mut groups = source
         .book_source_group
         .as_deref()
         .map(split_source_groups)
         .unwrap_or_default();
-    let had_invalid = groups
-        .iter()
-        .any(|group| group == INVALID_BOOK_SOURCE_GROUP);
+    let had_group = groups.iter().any(|group| group == target);
 
-    if invalid {
-        if had_invalid {
+    if present {
+        if had_group {
             return false;
         }
-        groups.push(INVALID_BOOK_SOURCE_GROUP.to_string());
+        groups.push(target.to_string());
     } else {
-        if !had_invalid {
+        if !had_group {
             return false;
         }
-        groups.retain(|group| group != INVALID_BOOK_SOURCE_GROUP);
+        groups.retain(|group| group != target);
     }
 
     source.book_source_group = if groups.is_empty() {
@@ -253,6 +261,10 @@ pub fn set_invalid_book_source_group(source: &mut BookSource, invalid: bool) -> 
         Some(groups.join(","))
     };
     true
+}
+
+pub fn set_invalid_book_source_group(source: &mut BookSource, invalid: bool) -> bool {
+    set_book_source_group_flag(source, INVALID_BOOK_SOURCE_GROUP, invalid)
 }
 
 fn split_source_groups(raw: &str) -> Vec<String> {

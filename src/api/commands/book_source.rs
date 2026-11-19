@@ -2,8 +2,10 @@ use crate::api::commands::{decode_header_file_name, decode_upload_body};
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
 use crate::model::book_source::{book_source_from_value, BookSource};
+use crate::service::book_service::SourceTestMode;
 use crate::service::book_source_service::{
-    book_source_has_group, set_invalid_book_source_group, INVALID_BOOK_SOURCE_GROUP,
+    book_source_has_group, set_book_source_group_flag, INVALID_BOOK_SOURCE_GROUP,
+    SEARCH_INVALID_BOOK_SOURCE_GROUP, TOC_INVALID_BOOK_SOURCE_GROUP,
 };
 use crate::util::text::normalize_source_url;
 use once_cell::sync::Lazy;
@@ -66,6 +68,7 @@ pub struct TestBookSourcesRequest {
     pub mark_invalid: Option<bool>,
     pub concurrent: Option<usize>,
     pub task_id: Option<String>,
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1088,6 +1091,11 @@ pub async fn test_book_sources(
     let concurrent = req.concurrent.unwrap_or(8).clamp(1, 8);
     let keyword = req.keyword.clone();
     let mark_invalid = req.mark_invalid.unwrap_or(true);
+    let (test_mode, target_invalid_group) = match req.mode.as_deref().map(str::trim) {
+        Some("search") => (SourceTestMode::Search, SEARCH_INVALID_BOOK_SOURCE_GROUP),
+        Some("toc") => (SourceTestMode::Toc, TOC_INVALID_BOOK_SOURCE_GROUP),
+        _ => (SourceTestMode::All, INVALID_BOOK_SOURCE_GROUP),
+    };
     let task_id = req.task_id.filter(|id| !id.trim().is_empty());
     let cancel_flag = Arc::new(AtomicBool::new(false));
     if let Some(id) = task_id.as_ref() {
@@ -1103,6 +1111,7 @@ pub async fn test_book_sources(
         state.book_service.clone(),
         user_ns.to_string(),
         keyword,
+        test_mode,
         sources,
         concurrent,
         cancel_flag,
@@ -1127,7 +1136,7 @@ pub async fn test_book_sources(
     let mut cancelled_count = 0usize;
     for (mut source, availability) in outcomes {
         // 被取消的源绝不能按结果写库: 它的 valid 是 false(未检测完),
-        // 走到下面会被 set_invalid_book_source_group 误标成"失效"并保存,
+        // 走到下面会被 set_book_source_group_flag 误标成失效并保存,
         // 把一个可能完全正常的书源标坏。只如实回报, 不改分组。
         if availability.cancelled {
             cancelled_count += 1;
@@ -1149,7 +1158,7 @@ pub async fn test_book_sources(
         }
 
         let changed = if mark_invalid {
-            set_invalid_book_source_group(&mut source, !availability.valid)
+            set_book_source_group_flag(&mut source, target_invalid_group, !availability.valid)
         } else {
             false
         };
@@ -1269,6 +1278,7 @@ async fn test_sources_in_parallel(
     book_service: Arc<crate::service::book_service::BookService>,
     user_ns: String,
     keyword: Option<String>,
+    mode: SourceTestMode,
     sources: Vec<BookSource>,
     concurrent: usize,
     cancel_flag: Arc<AtomicBool>,
@@ -1294,10 +1304,11 @@ async fn test_sources_in_parallel(
         let cancel = cancel_flag.clone();
         tasks.spawn(async move {
             let availability = book_service
-                .test_book_source_availability_cancellable(
+                .test_book_source_with_mode_cancellable(
                     &user_ns,
                     &source,
                     keyword.as_deref(),
+                    mode,
                     Some(&cancel),
                 )
                 .await;

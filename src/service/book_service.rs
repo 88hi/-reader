@@ -683,6 +683,13 @@ pub struct ExploreActionOutcome {
     pub logs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceTestMode {
+    All,
+    Search,
+    Toc,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookSourceAvailability {
@@ -1855,6 +1862,28 @@ impl BookService {
         keyword: Option<&str>,
         cancel: Option<&CancelSignal>,
     ) -> BookSourceAvailability {
+        self.test_book_source_with_mode_cancellable(
+            user_ns,
+            source,
+            keyword,
+            SourceTestMode::All,
+            cancel,
+        )
+        .await
+    }
+
+    /// 按指定模式执行书源检测：
+    /// - `All`：搜索或发现任一可用即有效（原「测试书源」）
+    /// - `Search`：仅测试搜索规则
+    /// - `Toc`：先从搜索（或发现）取一本示例书，再解析详情/目录首页验证目录可用
+    pub async fn test_book_source_with_mode_cancellable(
+        &self,
+        user_ns: &str,
+        source: &BookSource,
+        keyword: Option<&str>,
+        mode: SourceTestMode,
+        cancel: Option<&CancelSignal>,
+    ) -> BookSourceAvailability {
         let keyword = keyword
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -1868,6 +1897,7 @@ impl BookService {
             return cancelled_availability(source, &keyword);
         }
 
+        let mut sample_book_url: Option<String> = None;
         let (search_ok, search_error) = if source
             .search_url
             .as_deref()
@@ -1878,37 +1908,121 @@ impl BookService {
                 .search_book_cancellable(user_ns, source, &keyword, 1, cancel)
                 .await
             {
-                Ok(books) => (!books.is_empty(), None),
+                Ok(books) => {
+                    sample_book_url = books
+                        .iter()
+                        .map(|b| b.book_url.trim())
+                        .find(|u| !u.is_empty())
+                        .map(str::to_string);
+                    (!books.is_empty(), None)
+                }
                 Err(err) => (false, Some(format!("{err:?}"))),
             }
         } else {
             (false, Some("missing searchUrl or ruleSearch".to_string()))
         };
-        // 搜索阶段被取消: 不再发发现页请求, 直接返回取消结果。
         if is_cancelled(cancel) {
             return cancelled_availability(source, &keyword);
         }
 
-        let explore_url = self.explore_kinds(source).ok().and_then(|kinds| {
-            kinds
-                .into_iter()
-                .filter_map(|kind| kind.url)
-                .map(|url| url.trim().to_string())
-                .find(|url| !url.is_empty())
-        });
+        if mode == SourceTestMode::Search {
+            return BookSourceAvailability {
+                book_source_url: source.book_source_url.clone(),
+                book_source_name: source.book_source_name.clone(),
+                valid: search_ok,
+                search_ok,
+                explore_ok: false,
+                keyword,
+                explore_url: None,
+                search_error,
+                explore_error: None,
+                cancelled: false,
+            };
+        }
+
+        let need_explore = mode == SourceTestMode::All || sample_book_url.is_none();
+        let explore_url = if need_explore {
+            self.explore_kinds(source).ok().and_then(|kinds| {
+                kinds
+                    .into_iter()
+                    .filter_map(|kind| kind.url)
+                    .map(|url| url.trim().to_string())
+                    .find(|url| !url.is_empty())
+            })
+        } else {
+            None
+        };
         let (explore_ok, explore_error) = if let Some(url) = explore_url.as_deref() {
             match self
                 .explore_book_cancellable(user_ns, source, url, 1, cancel)
                 .await
             {
-                Ok(books) => (!books.is_empty(), None),
+                Ok(books) => {
+                    if sample_book_url.is_none() {
+                        sample_book_url = books
+                            .iter()
+                            .map(|b| b.book_url.trim())
+                            .find(|u| !u.is_empty())
+                            .map(str::to_string);
+                    }
+                    (!books.is_empty(), None)
+                }
                 Err(err) => (false, Some(format!("{err:?}"))),
             }
-        } else {
+        } else if need_explore {
             (false, Some("missing explore category url".to_string()))
+        } else {
+            (false, None)
         };
         if is_cancelled(cancel) {
             return cancelled_availability(source, &keyword);
+        }
+
+        if mode == SourceTestMode::Toc {
+            let (toc_ok, toc_error) = if let Some(book_url) = sample_book_url.as_deref() {
+                let toc_url = if source.rule_book_info.is_some() {
+                    match self.get_book_info(user_ns, source, book_url).await {
+                        Ok(info) => info
+                            .toc_url
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|u| !u.is_empty())
+                            .unwrap_or(book_url)
+                            .to_string(),
+                        Err(_) => book_url.to_string(),
+                    }
+                } else {
+                    book_url.to_string()
+                };
+                if is_cancelled(cancel) {
+                    return cancelled_availability(source, &keyword);
+                }
+                match self
+                    .get_chapter_list_first_page(user_ns, source, &toc_url)
+                    .await
+                {
+                    Ok((chapters, _)) if !chapters.is_empty() => (true, None),
+                    Ok(_) => (false, Some("empty chapter list".to_string())),
+                    Err(err) => (false, Some(format!("{err:?}"))),
+                }
+            } else {
+                (false, Some("no sample book found for toc test".to_string()))
+            };
+            if is_cancelled(cancel) {
+                return cancelled_availability(source, &keyword);
+            }
+            return BookSourceAvailability {
+                book_source_url: source.book_source_url.clone(),
+                book_source_name: source.book_source_name.clone(),
+                valid: toc_ok,
+                search_ok,
+                explore_ok,
+                keyword,
+                explore_url,
+                search_error: if toc_ok { search_error } else { toc_error },
+                explore_error,
+                cancelled: false,
+            };
         }
 
         BookSourceAvailability {

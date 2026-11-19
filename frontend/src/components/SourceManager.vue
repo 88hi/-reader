@@ -14,6 +14,7 @@
             :selected="selectedFilteredSources.length"
             :loading="loading"
             :testing="testingSources"
+            :test-mode="activeTestMode"
             :stopping="sourceTestStopRequested && testingSources"
             :test-completed="sourceTestProgress.completed"
             :test-total="sourceTestProgress.total"
@@ -22,7 +23,7 @@
             @import-local="triggerFileImport"
             @open-subscriptions="subscriptionPanelVisible = true"
             @export="exportSources"
-            @test-sources="testSources()"
+            @test-sources="(mode) => testSources(undefined, mode)"
             @cancel-test="cancelSourceTest"
             @delete-invalid="removeInvalidSources"
             @create="createSource"
@@ -138,6 +139,7 @@ import {
   exportBookSources,
   pinBookSource,
   unpinBookSource,
+  type BookSourceTestMode,
 } from '../api/source'
 import { useAppStore } from '../stores/app'
 import { isTauriRuntime } from '../api/transport'
@@ -185,6 +187,7 @@ const sourceStore = useSourceStore()
 const sources = ref<BookSource[]>([])
 const loading = ref(false)
 const testingSources = ref(false)
+const activeTestMode = ref<BookSourceTestMode>('all')
 const sourceTestProgress = ref({ completed: 0, total: 0 })
 const sourceTestTaskId = ref('')
 const sourceTestStopRequested = ref(false)
@@ -654,7 +657,7 @@ async function handleGroupPromptConfirm(groupsInput: string) {
   )
 }
 
-async function testSources(explicitTargets?: BookSource[]) {
+async function testSources(explicitTargets?: BookSource[], mode: BookSourceTestMode = 'all') {
   const targets = explicitTargets?.length
     ? explicitTargets
     : (selectedFilteredSources.value.length ? selectedFilteredSources.value : sources.value)
@@ -662,14 +665,24 @@ async function testSources(explicitTargets?: BookSource[]) {
     appStore.showToast('没有可测试的书源', 'warning')
     return
   }
+  const modeMeta = mode === 'search'
+    ? { title: '测试搜索', action: '测试搜索', invalidGroup: '搜索失效' }
+    : mode === 'toc'
+      ? { title: '测试目录', action: '测试目录', invalidGroup: '目录失效' }
+      : { title: '测试书源', action: '测试', invalidGroup: '失效' }
+
   // 单源入口与批量入口的措辞分开: 前者点名书源, 后者说数量。
   const single = explicitTargets?.length === 1 ? explicitTargets[0] : null
   const scopeText = single
     ? `「${single.bookSourceName}」这 1`
     : (selectedFilteredSources.value.length ? `选中的 ${targets.length}` : `全部 ${targets.length}`)
-  const ok = await appStore.confirmDialog(`将测试${scopeText} 个书源。测试会请求外部站点，耗时可能较长，是否继续？`, { title: '测试书源' })
+  const ok = await appStore.confirmDialog(
+    `将对${scopeText} 个书源执行${modeMeta.action}，异常书源会分到「${modeMeta.invalidGroup}」分组。测试会请求外部站点，耗时可能较长，是否继续？`,
+    { title: modeMeta.title },
+  )
   if (!ok) return
 
+  activeTestMode.value = mode
   testingSources.value = true
   sourceTestStopRequested.value = false
   sourceTestTaskId.value = `source-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -699,6 +712,7 @@ async function testSources(explicitTargets?: BookSource[]) {
           // 与后端 clamp 后的上限一致(8): 设更高只会被截断, 反而误导。
           concurrent: 8,
           taskId: sourceTestTaskId.value,
+          mode,
         })
       )
       completedBeforeBatch += responses.at(-1)?.total || 0
@@ -708,7 +722,7 @@ async function testSources(explicitTargets?: BookSource[]) {
     const result = mergeBookSourceTestResponses(responses)
     await loadSources()
     if (result.invalid > 0 && !result.cancelled) {
-      filterGroup.value = '失效'
+      filterGroup.value = modeMeta.invalidGroup
     }
     if (sourceTestStopRequested.value || result.cancelled) {
       // 如实区分三种数: 已完成(有效/失效)与未检测的。不能把未完成的算成"失效"。
@@ -719,17 +733,17 @@ async function testSources(explicitTargets?: BookSource[]) {
       // 三种情况。不能用 `cancelledCount`(只含最后一种) 或 `total`(含已取消条目),
       // 否则 100 个源只测 5 个就中止时会显示成"2 个未检测"。
       const undone = Math.max(0, targets.length - result.valid - result.invalid)
-      const parts = [`测试已中止`, `有效 ${result.valid}`, `失效 ${result.invalid}`]
+      const parts = [`${modeMeta.title}已中止`, `有效 ${result.valid}`, `${modeMeta.invalidGroup} ${result.invalid}`]
       if (undone > 0) parts.push(`${undone} 个未检测`)
       appStore.showToast(parts.join('，'), 'warning')
     } else {
       appStore.showToast(
-        `测试完成：有效 ${result.valid} 个，失效 ${result.invalid} 个，更新分组 ${result.markedInvalid} 个`,
+        `${modeMeta.title}完成：有效 ${result.valid} 个，${modeMeta.invalidGroup} ${result.invalid} 个，更新分组 ${result.markedInvalid} 个`,
         result.invalid > 0 ? 'warning' : 'success'
       )
     }
   } catch (e: unknown) {
-    appStore.showToast((e as Error).message || '书源测试失败', 'error')
+    appStore.showToast((e as Error).message || `${modeMeta.title}失败`, 'error')
   } finally {
     stopSourceTestProgressListener?.()
     stopSourceTestProgressListener = null

@@ -2376,4 +2376,29 @@ describe('reader switching book source', () => {
     expect(readerStore.activePanel).toBe('source')
     expect(appStore.toasts.some((toast) => toast.message.includes('切换失败'))).toBe(true)
   })
+
+  it('does not fail opening a large book when reader-last-session exceeds storage quota', async () => {
+    const readerStore = useReaderStore()
+    vi.mocked(getChapterList).mockResolvedValue([
+      { title: '第一章', url: 'local-txt:big#0', index: 0 },
+      { title: '第二章', url: 'local-txt:big#1', index: 1 },
+    ])
+    vi.mocked(getBookContent).mockResolvedValue('大型本地书正文')
+    vi.mocked(localStorage.setItem).mockImplementation((key: string) => {
+      if (key === 'reader-last-session') {
+        throw new DOMException("Setting the value of 'reader-last-session' exceeded the quota.", 'QuotaExceededError')
+      }
+    })
+
+    await readerStore.loadBook({
+      name: '超长TXT小说',
+      author: '本地导入',
+      origin: 'local-txt',
+      bookUrl: 'local-txt:big',
+      durChapterIndex: 0,
+    })
+
+    expect(readerStore.chapters).toHaveLength(2)
+    expect(readerStore.content).toBe('大型本地书正文')
+  })
 })
