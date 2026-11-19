@@ -468,7 +468,13 @@ async fn save_imported_book(
     imported: Result<crate::model::book::Book, AppError>,
 ) -> Result<ApiResponse<Value>, AppError> {
     let book = imported?;
-    let saved = state.book_service.save_book("default", book).await?;
+    let (saved, replaced) = state
+        .book_service
+        .save_imported_local_book("default", book)
+        .await?;
+    if let Some(old) = replaced {
+        crate::api::commands::book::cleanup_local_book_files(state, "default", &[old]).await;
+    }
     Ok(ApiResponse::ok(
         serde_json::to_value(saved).unwrap_or_default(),
     ))

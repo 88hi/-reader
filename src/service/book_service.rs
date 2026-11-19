@@ -3020,16 +3020,15 @@ impl BookService {
         let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
 
-        let incoming_name = normalize_book_name(&book.name);
         let exist_idx = list
             .iter()
             .position(|b| b.book_url == book.book_url)
             .or_else(|| {
-                if incoming_name.is_empty() {
+                if book.name.trim().is_empty() {
                     return None;
                 }
                 list.iter()
-                    .position(|b| normalize_book_name(&b.name) == incoming_name)
+                    .position(|b| local_book_matches_existing(b, &book.name))
             });
 
         let mut replaced_local = None;
@@ -3037,6 +3036,11 @@ impl BookService {
             let exist = list[i].clone();
             merge_book_read_config(&exist, &mut book);
             merge_book_source_candidates(&exist, &mut book);
+
+            // 合并同名书时保留书架上原有的干净书名（避免被带作者/章节后缀的文件名覆盖）。
+            if !exist.name.trim().is_empty() {
+                book.name = exist.name.clone();
+            }
 
             // 保留原有阅读进度：本地导入默认初始化为第 0 章第 0 位置，不能覆盖已有进度。
             if let Some(idx) = exist.dur_chapter_index {
@@ -4612,6 +4616,204 @@ fn normalize_book_name(value: &str) -> String {
         .filter(|ch| !ch.is_whitespace())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn strip_trailing_bracketed(s: &str) -> &str {
+    for (open, close) in [('(', ')'), ('（', '）'), ('[', ']'), ('【', '】'), ('{', '}')] {
+        if let Some(without_close) = s.strip_suffix(close) {
+            if let Some(open_idx) = without_close.rfind(open) {
+                let prefix = without_close[..open_idx].trim_end();
+                if !prefix.is_empty() {
+                    return prefix;
+                }
+            }
+        }
+    }
+    s
+}
+
+/// 剥离本地书文件名常见的书名号、作者后缀、括号标注及版本标签，用于同名书籍归一化匹配。
+fn canonical_local_book_name(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    if s.is_empty() {
+        return s;
+    }
+    if let Some(after_open) = s.strip_prefix('《') {
+        if let Some(close_idx) = after_open.find('》') {
+            let inner = after_open[..close_idx].trim();
+            if !inner.is_empty() {
+                s = inner.to_string();
+            }
+        }
+    }
+    for marker in [
+        "作者：", "作者:", " 作者", "_作者", "-作者", " by ", " BY ", " By ",
+    ] {
+        if let Some(idx) = s.find(marker) {
+            let prefix = s[..idx].trim();
+            if !prefix.is_empty() {
+                s = prefix.to_string();
+            }
+        }
+    }
+    loop {
+        let trimmed = s.trim_end();
+        let next = strip_trailing_bracketed(trimmed);
+        if next.len() < trimmed.len() && !next.trim().is_empty() {
+            s = next.trim().to_string();
+        } else {
+            break;
+        }
+    }
+    loop {
+        let trimmed = s.trim_end_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '-' | '_' | '—' | '–' | '·' | '|' | '/' | '.')
+        });
+        let mut stripped = None;
+        for suffix in [
+            "精校版", "校对版", "完整版", "未删节", "无删减", "全本", "完结", "精校", "番外",
+        ] {
+            if let Some(head) = trimmed.strip_suffix(suffix) {
+                let head_trimmed = head.trim_end();
+                if !head_trimmed.is_empty()
+                    && (head.len() > head_trimmed.len()
+                        || head_trimmed.ends_with(['-', '_', '—', '–', '·', '|', '/']))
+                {
+                    stripped = Some(head_trimmed.to_string());
+                    break;
+                }
+            }
+        }
+        if let Some(next) = stripped {
+            s = next;
+        } else {
+            s = trimmed.to_string();
+            break;
+        }
+    }
+    s
+}
+
+/// 去除空白与常见标点符号后的书名比对键（兼容中英文逗号/冒号/书名号等差异）。
+fn compact_book_name_key(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| {
+            !ch.is_whitespace()
+                && !matches!(
+                    ch,
+                    '《' | '》'
+                        | '「'
+                        | '」'
+                        | '『'
+                        | '』'
+                        | '【'
+                        | '】'
+                        | '['
+                        | ']'
+                        | '('
+                        | ')'
+                        | '（'
+                        | '）'
+                        | ','
+                        | '，'
+                        | '.'
+                        | '。'
+                        | ':'
+                        | '：'
+                        | ';'
+                        | '；'
+                        | '!'
+                        | '！'
+                        | '?'
+                        | '？'
+                        | '、'
+                        | '-'
+                        | '—'
+                        | '–'
+                        | '_'
+                        | '~'
+                        | '·'
+                        | '\''
+                        | '"'
+                        | '“'
+                        | '”'
+                        | '‘'
+                        | '’'
+                        | '/'
+                        | '\\'
+                        | '|'
+                )
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_local_name_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '(' | '（'
+                | '['
+                | '【'
+                | '{'
+                | '》'
+                | '-'
+                | '_'
+                | '—'
+                | '–'
+                | '·'
+                | '|'
+                | '/'
+                | ':'
+                | '：'
+        )
+}
+
+/// 判断导入的本地书是否与书架上已有书籍为同一本书。
+fn local_book_matches_existing(existing: &Book, incoming_name: &str) -> bool {
+    if normalize_book_name(&existing.name) == normalize_book_name(incoming_name) {
+        return true;
+    }
+    let exist_canonical = canonical_local_book_name(&existing.name);
+    let incoming_canonical = canonical_local_book_name(incoming_name);
+    let exist_key = compact_book_name_key(&exist_canonical);
+    let incoming_key = compact_book_name_key(&incoming_canonical);
+    if !exist_key.is_empty() && exist_key == incoming_key {
+        return true;
+    }
+    // 兼容本地文件名在书名后附带分隔符与额外信息（如「书名 1-498章」「书名 - 作者名」），
+    // 只要某个分隔符之前的前缀与书架书名完全一致即视为同一本书（避免「遮天」误匹配「遮天记」）。
+    if !exist_key.is_empty() {
+        for (byte_idx, ch) in incoming_canonical.char_indices() {
+            if is_local_name_boundary(ch) {
+                let prefix_key = compact_book_name_key(&incoming_canonical[..byte_idx]);
+                if prefix_key == exist_key {
+                    return true;
+                }
+            }
+        }
+        // 反向：书架里原有的是带后缀的本地书，新导入的是干净书名
+        for (byte_idx, ch) in exist_canonical.char_indices() {
+            if is_local_name_boundary(ch) {
+                let prefix_key = compact_book_name_key(&exist_canonical[..byte_idx]);
+                if !incoming_key.is_empty() && prefix_key == incoming_key {
+                    return true;
+                }
+            }
+        }
+    }
+    // 标点不同且后接作者名（无分隔符的情况）
+    if exist_key.chars().count() >= 4 && incoming_key.starts_with(&exist_key) {
+        let exist_author_key = compact_book_name_key(&existing.author);
+        let tail = &incoming_key[exist_key.len()..];
+        if !exist_author_key.is_empty()
+            && exist_author_key != "本地导入"
+            && tail.contains(&exist_author_key)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn normalize_book_author(value: &str) -> String {
@@ -6876,5 +7078,44 @@ mod tests {
         assert_eq!(service.get_bookshelf("default").await.unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    #[test]
+    fn local_book_matches_existing_handles_common_filename_variants() {
+        let existing = Book {
+            name: "上界唯唯诺诺，下界为所欲为".to_string(),
+            author: "蒙面的大黄鸭".to_string(),
+            ..Default::default()
+        };
+        assert!(local_book_matches_existing(&existing, "上界唯唯诺诺，下界为所欲为"));
+        assert!(local_book_matches_existing(&existing, "上界唯唯诺诺,下界为所欲为"));
+        assert!(local_book_matches_existing(
+            &existing,
+            "上界唯唯诺诺，下界为所欲为（1-498章）"
+        ));
+        assert!(local_book_matches_existing(
+            &existing,
+            "上界唯唯诺诺，下界为所欲为 作者：蒙面的大黄鸭"
+        ));
+        assert!(local_book_matches_existing(
+            &existing,
+            "《上界唯唯诺诺，下界为所欲为》精校全本"
+        ));
+        assert!(local_book_matches_existing(
+            &existing,
+            "上界唯唯诺诺,下界为所欲为 蒙面的大黄鸭"
+        ));
+        assert!(local_book_matches_existing(
+            &existing,
+            "上界唯唯诺诺，下界为所欲为 - 完结"
+        ));
+
+        let short = Book {
+            name: "遮天".to_string(),
+            author: "辰东".to_string(),
+            ..Default::default()
+        };
+        assert!(!local_book_matches_existing(&short, "遮天记"));
+        assert!(local_book_matches_existing(&short, "遮天 (精校版)"));
     }
 }

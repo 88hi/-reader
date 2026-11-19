@@ -3194,7 +3194,7 @@ async fn find_matching_books(
         .collect())
 }
 
-async fn cleanup_local_book_files(state: &AppState, user_ns: &str, books: &[Book]) {
+pub(crate) async fn cleanup_local_book_files(state: &AppState, user_ns: &str, books: &[Book]) {
     for book in books {
         if is_local_txt_origin(&book.origin) || is_local_txt_url(&book.book_url) {
             if let Err(err) = state

@@ -31,18 +31,36 @@
               <span class="shelf-btn-label">取消全选</span>
             </button>
           </template>
-          <button class="shelf-btn" type="button" title="导入本地书" aria-label="导入本地书" @click="triggerLocalBookUpload" :disabled="localBookUploading">
-            <svg v-if="!localBookUploading" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 3v12" />
-              <path d="m7 8 5-5 5 5" />
-              <path d="M5 21h14" />
-            </svg>
-            <svg v-else class="spinning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
-              <path d="M3 3v5h5" />
-            </svg>
-            <span class="shelf-btn-label">{{ localBookUploading ? '导入中' : '导入本地书' }}</span>
-          </button>
+          <div ref="importMenuRef" class="import-menu">
+            <button
+              class="shelf-btn"
+              type="button"
+              title="导入本地书"
+              aria-label="导入本地书"
+              :aria-expanded="importMenuOpen"
+              @click="toggleImportMenu"
+              :disabled="localBookUploading"
+            >
+              <svg v-if="!localBookUploading" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 3v12" />
+                <path d="m7 8 5-5 5 5" />
+                <path d="M5 21h14" />
+              </svg>
+              <svg v-else class="spinning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 12a9 9 0 0 0-15.55-6.2L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+              <span class="shelf-btn-label">{{ localBookUploadLabel }}</span>
+            </button>
+            <div v-if="importMenuOpen" class="sort-popover import-popover" role="menu">
+              <button class="sort-option" type="button" role="menuitem" @click="triggerLocalBookUpload">
+                <span>选择文件（可多选）</span>
+              </button>
+              <button class="sort-option" type="button" role="menuitem" @click="triggerLocalBookFolderUpload">
+                <span>选择文件夹批量导入</span>
+              </button>
+            </div>
+          </div>
           <!-- 导出走桌面文件对话框(save dialog + 本地路径), 浏览器里没有等价能力。 -->
           <button
             v-if="!appStore.isWebMode"
@@ -119,9 +137,19 @@
       <input
         ref="localBookFileInputRef"
         type="file"
+        multiple
         accept=".txt,.epub,.pdf,text/plain,application/epub+zip,application/pdf"
         class="hidden-input"
         @change="handleLocalBookFileChange"
+      />
+      <input
+        ref="localBookFolderInputRef"
+        type="file"
+        webkitdirectory
+        directory
+        multiple
+        class="hidden-input"
+        @change="handleLocalBookFolderChange"
       />
 
       <!-- Group Tabs -->
@@ -496,7 +524,46 @@ watch(showDetail, (visible) => {
 })
 const openingBookUrl = ref('')
 const localBookFileInputRef = ref<HTMLInputElement | null>(null)
+const localBookFolderInputRef = ref<HTMLInputElement | null>(null)
 const localBookUploading = ref(false)
+const localBookUploadProgress = ref({ current: 0, total: 0 })
+const importMenuOpen = ref(false)
+const importMenuRef = ref<HTMLElement | null>(null)
+
+const localBookUploadLabel = computed(() => {
+  if (!localBookUploading.value) return '导入本地书'
+  if (localBookUploadProgress.value.total > 1) {
+    return `导入中 (${localBookUploadProgress.value.current}/${localBookUploadProgress.value.total})`
+  }
+  return '导入中'
+})
+
+function toggleImportMenu() {
+  if (localBookUploading.value) return
+  sortMenuOpen.value = false
+  columnMenuOpen.value = false
+  importMenuOpen.value = !importMenuOpen.value
+}
+
+function onImportMenuOutsideClick(event: MouseEvent) {
+  const target = event.target as Node | null
+  if (target && importMenuRef.value?.contains(target)) return
+  importMenuOpen.value = false
+}
+
+function onImportMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') importMenuOpen.value = false
+}
+
+watch(importMenuOpen, (open) => {
+  if (open) {
+    window.addEventListener('click', onImportMenuOutsideClick, true)
+    window.addEventListener('keydown', onImportMenuKeydown)
+  } else {
+    window.removeEventListener('click', onImportMenuOutsideClick, true)
+    window.removeEventListener('keydown', onImportMenuKeydown)
+  }
+})
 
 /** 分组编辑器的目标书: 右键单本时是那一本, 批量时是所有选中书。
  *
@@ -533,37 +600,95 @@ onMounted(async () => {
 })
 
 function triggerLocalBookUpload() {
+  importMenuOpen.value = false
   if (localBookUploading.value) return
   localBookFileInputRef.value?.click()
 }
 
-async function handleLocalBookFileChange(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
+function triggerLocalBookFolderUpload() {
+  importMenuOpen.value = false
+  if (localBookUploading.value) return
+  localBookFolderInputRef.value?.click()
+}
 
+function isSupportedLocalBookFile(file: File): boolean {
   const lowerName = file.name.toLowerCase()
-  if (!lowerName.endsWith('.txt') && !lowerName.endsWith('.epub') && !lowerName.endsWith('.pdf')) {
-    appStore.showToast('只支持导入 .txt、.epub 或 .pdf 文件', 'warning')
+  return lowerName.endsWith('.txt') || lowerName.endsWith('.epub') || lowerName.endsWith('.pdf')
+}
+
+async function importLocalBookFiles(rawFiles: File[], fromFolder: boolean) {
+  if (!rawFiles.length) return
+  const supported = rawFiles
+    .filter(isSupportedLocalBookFile)
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+
+  if (!supported.length) {
+    appStore.showToast(
+      fromFolder
+        ? '所选文件夹中没有可导入的 .txt、.epub 或 .pdf 文件'
+        : '只支持导入 .txt、.epub 或 .pdf 文件',
+      'warning',
+    )
     return
   }
 
   localBookUploading.value = true
+  localBookUploadProgress.value = { current: 0, total: supported.length }
+  const importedBooks: Book[] = []
+  let failedCount = 0
+  let lastError = ''
+
   try {
-    const book = lowerName.endsWith('.epub')
-      ? await uploadEpubBook(file)
-      : lowerName.endsWith('.pdf')
-        ? await uploadPdfBook(file)
-        : await uploadTxtBook(file)
-    await shelfStore.fetchBooks()
-    appStore.showToast(`已导入《${book.name}》`, 'success')
-    await handleBookClick(book)
-  } catch (e: unknown) {
-    appStore.showToast((e as Error).message || '本地书导入失败', 'error')
+    for (let idx = 0; idx < supported.length; idx++) {
+      const file = supported[idx]!
+      localBookUploadProgress.value = { current: idx + 1, total: supported.length }
+      const lowerName = file.name.toLowerCase()
+      try {
+        const book = lowerName.endsWith('.epub')
+          ? await uploadEpubBook(file)
+          : lowerName.endsWith('.pdf')
+            ? await uploadPdfBook(file)
+            : await uploadTxtBook(file)
+        importedBooks.push(book)
+      } catch (e: unknown) {
+        failedCount += 1
+        lastError = (e as Error).message || '本地书导入失败'
+      }
+    }
+
+    if (importedBooks.length > 0) {
+      await shelfStore.fetchBooks()
+    }
+
+    if (!fromFolder && supported.length === 1 && importedBooks.length === 1) {
+      const book = importedBooks[0]!
+      appStore.showToast(`已导入《${book.name}》`, 'success')
+      await handleBookClick(book)
+    } else if (importedBooks.length > 0 && failedCount === 0) {
+      appStore.showToast(`已导入 ${importedBooks.length} 本本地书籍`, 'success')
+    } else if (importedBooks.length > 0 && failedCount > 0) {
+      appStore.showToast(`导入完成：成功 ${importedBooks.length} 本，失败 ${failedCount} 本`, 'warning')
+    } else {
+      appStore.showToast(lastError || '本地书导入失败', 'error')
+    }
   } finally {
     localBookUploading.value = false
+    localBookUploadProgress.value = { current: 0, total: 0 }
   }
+}
+
+async function handleLocalBookFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = input.files ? Array.from(input.files) : []
+  input.value = ''
+  await importLocalBookFiles(files, false)
+}
+
+async function handleLocalBookFolderChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = input.files ? Array.from(input.files) : []
+  input.value = ''
+  await importLocalBookFiles(files, true)
 }
 
 async function handleBookClick(book: Book | SearchBook) {
@@ -764,6 +889,7 @@ function chooseColumns(value: number) {
 
 function toggleColumnMenu() {
   sortMenuOpen.value = false
+  importMenuOpen.value = false
   columnMenuOpen.value = !columnMenuOpen.value
 }
 
@@ -811,6 +937,7 @@ async function chooseSort(value: number) {
 
 function toggleSortMenu() {
   columnMenuOpen.value = false
+  importMenuOpen.value = false
   sortMenuOpen.value = !sortMenuOpen.value
 }
 
@@ -842,6 +969,8 @@ onBeforeUnmount(() => {
     window.clearTimeout(groupTabsScrollTimer)
     groupTabsScrollTimer = null
   }
+  window.removeEventListener('click', onImportMenuOutsideClick, true)
+  window.removeEventListener('keydown', onImportMenuKeydown)
   window.removeEventListener('click', onColumnMenuOutsideClick, true)
   window.removeEventListener('keydown', onColumnMenuKeydown)
   window.removeEventListener('click', onSortMenuOutsideClick, true)
@@ -1140,6 +1269,14 @@ onBeforeUnmount(() => {
 
 .sort-trigger.open .sort-caret {
   transform: rotate(180deg);
+}
+
+.import-menu {
+  position: relative;
+}
+
+.import-popover {
+  min-width: 176px;
 }
 
 .sort-popover {
