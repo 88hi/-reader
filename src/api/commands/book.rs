@@ -1295,7 +1295,13 @@ pub async fn upload_txt_book(
         .local_txt_book_service
         .import_txt_book(&user_ns, &file_name, &file)
         .await?;
-    let saved = state.book_service.save_book(&user_ns, book).await?;
+    let (saved, replaced) = state
+        .book_service
+        .save_imported_local_book(&user_ns, book)
+        .await?;
+    if let Some(old) = replaced {
+        cleanup_local_book_files(&state, &user_ns, &[old]).await;
+    }
     Ok(ApiResponse::ok(
         serde_json::to_value(saved).unwrap_or_default(),
     ))
@@ -1316,7 +1322,13 @@ pub async fn upload_epub_book(
         .local_epub_book_service
         .import_epub_book(&user_ns, &file_name, &file)
         .await?;
-    let saved = state.book_service.save_book(&user_ns, book).await?;
+    let (saved, replaced) = state
+        .book_service
+        .save_imported_local_book(&user_ns, book)
+        .await?;
+    if let Some(old) = replaced {
+        cleanup_local_book_files(&state, &user_ns, &[old]).await;
+    }
     Ok(ApiResponse::ok(
         serde_json::to_value(saved).unwrap_or_default(),
     ))
@@ -1337,7 +1349,13 @@ pub async fn upload_pdf_book(
         .local_pdf_book_service
         .import_pdf_book(&user_ns, &file_name, &file)
         .await?;
-    let saved = state.book_service.save_book(&user_ns, book).await?;
+    let (saved, replaced) = state
+        .book_service
+        .save_imported_local_book(&user_ns, book)
+        .await?;
+    if let Some(old) = replaced {
+        cleanup_local_book_files(&state, &user_ns, &[old]).await;
+    }
     Ok(ApiResponse::ok(
         serde_json::to_value(saved).unwrap_or_default(),
     ))

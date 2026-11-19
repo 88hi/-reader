@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { normalizeKinds, useExploreStore } from './explore'
+import { EXPLORE_UNGROUPED_VALUE, normalizeKinds, useExploreStore } from './explore'
 import { useSourceStore } from './source'
 import { getBookSources } from '../api/source'
 import { exploreBook, exploreKindLabel, getExploreKinds, runExploreAction } from '../api/explore'
@@ -843,6 +843,70 @@ describe('explore pagination', () => {
 
     expect(store.books.map((book) => book.name)).toEqual(['第一本', '第二本'])
     expect(store.hasMore).toBe(true)
+  })
+})
+
+describe('explore source group filter', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    getBookSourcesMock.mockReset()
+    exploreBookMock.mockReset()
+    getExploreKindsMock.mockReset()
+    runExploreActionMock.mockReset()
+    exploreBookMock.mockResolvedValue([])
+    getExploreKindsMock.mockResolvedValue([])
+    runExploreActionMock.mockResolvedValue(idleOutcome())
+  })
+
+  it('extracts groups, filters sources, and switches active source when changing group', async () => {
+    const sourceStore = useSourceStore()
+    sourceStore.sources = [
+      {
+        bookSourceName: '男频源A',
+        bookSourceUrl: 'https://male-a.example',
+        bookSourceGroup: '男频, 精选',
+        enabledExplore: true,
+        exploreUrl: JSON.stringify([{ title: '男频榜', url: '/male-a' }]),
+      },
+      {
+        bookSourceName: '女频源B',
+        bookSourceUrl: 'https://female-b.example',
+        bookSourceGroup: '女频',
+        enabledExplore: true,
+        exploreUrl: JSON.stringify([{ title: '女频榜', url: '/female-b' }]),
+      },
+      {
+        bookSourceName: '未分组源C',
+        bookSourceUrl: 'https://none-c.example',
+        bookSourceGroup: '',
+        enabledExplore: true,
+        exploreUrl: JSON.stringify([{ title: '综合榜', url: '/none-c' }]),
+      },
+    ]
+
+    const store = useExploreStore()
+    await store.init()
+
+    expect(store.exploreSourceGroups).toEqual(['女频', '男频', '精选'])
+    expect(store.hasUngroupedExploreSources).toBe(true)
+    expect(store.filteredExploreSources.map((s) => s.bookSourceName)).toEqual(['男频源A', '女频源B', '未分组源C'])
+    expect(store.activeSourceUrl).toBe('https://male-a.example')
+
+    await store.setSourceGroup('女频')
+    expect(store.activeSourceGroup).toBe('女频')
+    expect(store.filteredExploreSources.map((s) => s.bookSourceName)).toEqual(['女频源B'])
+    expect(store.activeSourceUrl).toBe('https://female-b.example')
+    expect(store.activeCategoryUrl).toBe('/female-b')
+
+    await store.setSourceGroup(EXPLORE_UNGROUPED_VALUE)
+    expect(store.filteredExploreSources.map((s) => s.bookSourceName)).toEqual(['未分组源C'])
+    expect(store.activeSourceUrl).toBe('https://none-c.example')
+
+    // 若当前选中分组在书源变更后已不存在，init 时自动回退到全部
+    sourceStore.sources = [sourceStore.sources[0]!]
+    await store.init()
+    expect(store.activeSourceGroup).toBe('')
+    expect(store.activeSourceUrl).toBe('https://male-a.example')
   })
 })
 

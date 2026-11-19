@@ -9,6 +9,8 @@
       :is="animateEnabled ? TransitionGroup : 'div'"
       v-bind="animateEnabled ? { tag: 'div', name: 'card' } : {}"
       class="book-grid-list"
+      :class="{ 'is-fixed-columns': fixedColumns > 0 }"
+      :style="fixedColumns > 0 ? { '--book-grid-columns': String(fixedColumns) } : undefined"
     >
       <div
         v-for="item in displayItems"
@@ -116,8 +118,17 @@ const props = withDefaults(defineProps<{
   shelfBookUrls?: Set<string>
   /** 已在书架的书名与作者标识，跨书源判断同一本书。 */
   shelfBookKeys?: Set<string>
+  /** 每排显示的书籍数量；0 或不传表示按容器宽度自动排列。 */
+  columns?: number
 }>(), {
   animate: true,
+  columns: 0,
+})
+
+const fixedColumns = computed(() => {
+  const num = Number(props.columns)
+  if (!Number.isFinite(num) || num <= 0) return 0
+  return Math.min(8, Math.max(4, Math.round(num)))
 })
 
 /** 过渡开关: 由 `animate` 的默认值决定, 未显式传 `false` 时为 true。 */
@@ -555,6 +566,10 @@ const ghostStyle = computed(() => {
   padding: var(--space-1) 0;
 }
 
+.book-grid-list.is-fixed-columns {
+  grid-template-columns: repeat(var(--book-grid-columns), minmax(0, 1fr));
+}
+
 .book-grid-item {
   min-width: 0;
   width: 100%;
@@ -694,7 +709,7 @@ const ghostStyle = computed(() => {
 }
 
 @media (max-width: 640px) {
-  .book-grid-list {
+  .book-grid-list:not(.is-fixed-columns) {
     grid-template-columns: 1fr;
   }
 

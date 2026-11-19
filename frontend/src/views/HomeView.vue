@@ -223,6 +223,50 @@
             </svg>
           </button>
         </div>
+        <div ref="columnMenuRef" class="sort-trigger-wrap">
+          <button
+            type="button"
+            class="sort-trigger"
+            :class="{ open: columnMenuOpen }"
+            :aria-expanded="columnMenuOpen"
+            aria-haspopup="listbox"
+            :title="`每排显示数量:${gridColumnsLabel}`"
+            :aria-label="`每排显示数量:${gridColumnsLabel}`"
+            @click="toggleColumnMenu"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <rect x="3" y="4" width="7" height="7" rx="1.2" />
+              <rect x="14" y="4" width="7" height="7" rx="1.2" />
+              <rect x="3" y="13" width="7" height="7" rx="1.2" />
+              <rect x="14" y="13" width="7" height="7" rx="1.2" />
+            </svg>
+            <span>{{ gridColumnsLabel }}</span>
+            <svg class="sort-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
+          <Transition name="sort-pop">
+            <div v-if="columnMenuOpen" class="sort-popover" role="listbox" aria-label="每排显示书籍数量">
+              <button
+                v-for="option in BOOK_COLUMN_OPTIONS"
+                :key="option.value"
+                type="button"
+                class="sort-option"
+                :class="{ active: option.value === shelfStore.gridColumns }"
+                role="option"
+                :aria-selected="option.value === shelfStore.gridColumns"
+                @click="chooseColumns(option.value)"
+              >
+                <span class="sort-option-dot" aria-hidden="true">
+                  <svg v-if="option.value === shelfStore.gridColumns" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                </span>
+                <span class="sort-option-label">{{ option.label }}</span>
+              </button>
+            </div>
+          </Transition>
+        </div>
         <div ref="sortMenuRef" class="sort-trigger-wrap">
           <button
             type="button"
@@ -275,6 +319,7 @@
           :selected-urls="shelfStore.selectedBookUrls"
           :loading="shelfStore.loading"
           :sortable="sortable"
+          :columns="shelfStore.gridColumns"
           :empty-text="shelfEmptyText"
         @click="handleBookClick"
         @info="handleBookInfo"
@@ -330,7 +375,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useBookshelfStore } from '../stores/bookshelf'
+import { BOOK_COLUMN_OPTIONS, useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { uploadEpubBook, uploadPdfBook, uploadTxtBook } from '../api/bookshelf'
@@ -705,6 +750,43 @@ const sortable = computed(() => (
   && !shelfStore.isSearchMode
 ))
 
+// ─── 每排数量下拉 ───
+const columnMenuOpen = ref(false)
+const columnMenuRef = ref<HTMLElement | null>(null)
+const gridColumnsLabel = computed(() => (
+  shelfStore.gridColumns > 0 ? `${shelfStore.gridColumns} 本/排` : '每排自动'
+))
+
+function chooseColumns(value: number) {
+  columnMenuOpen.value = false
+  shelfStore.setGridColumns(value)
+}
+
+function toggleColumnMenu() {
+  sortMenuOpen.value = false
+  columnMenuOpen.value = !columnMenuOpen.value
+}
+
+function onColumnMenuOutsideClick(event: MouseEvent) {
+  const target = event.target as Node | null
+  if (target && columnMenuRef.value?.contains(target)) return
+  columnMenuOpen.value = false
+}
+
+function onColumnMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') columnMenuOpen.value = false
+}
+
+watch(columnMenuOpen, (open) => {
+  if (open) {
+    window.addEventListener('click', onColumnMenuOutsideClick, true)
+    window.addEventListener('keydown', onColumnMenuKeydown)
+  } else {
+    window.removeEventListener('click', onColumnMenuOutsideClick, true)
+    window.removeEventListener('keydown', onColumnMenuKeydown)
+  }
+})
+
 // ─── 排序下拉 ───
 const sortMenuOpen = ref(false)
 const sortMenuRef = ref<HTMLElement | null>(null)
@@ -728,6 +810,7 @@ async function chooseSort(value: number) {
 }
 
 function toggleSortMenu() {
+  columnMenuOpen.value = false
   sortMenuOpen.value = !sortMenuOpen.value
 }
 
@@ -759,6 +842,8 @@ onBeforeUnmount(() => {
     window.clearTimeout(groupTabsScrollTimer)
     groupTabsScrollTimer = null
   }
+  window.removeEventListener('click', onColumnMenuOutsideClick, true)
+  window.removeEventListener('keydown', onColumnMenuKeydown)
   window.removeEventListener('click', onSortMenuOutsideClick, true)
   window.removeEventListener('keydown', onSortMenuKeydown)
 })

@@ -13,6 +13,19 @@ import { useSourceStore } from './source'
 import type { SearchBook, BookSource } from '../types'
 import type { ShowBrowserRequest } from '../api/sourceClick'
 import { getInitialExploreCategoryUrl, isJsExploreUrl, parseExploreCategories } from '../utils/exploreCategories'
+import { getBookSourceGroups } from '../utils/sourceSelection'
+
+/** 发现页「未分组」书源筛选值。 */
+export const EXPLORE_UNGROUPED_VALUE = '__ungrouped__'
+
+function sourceHasGroup(source: BookSource, group: string): boolean {
+  const parts = (source.bookSourceGroup || '')
+    .split(/[,;；、]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+  if (group === EXPLORE_UNGROUPED_VALUE) return parts.length === 0
+  return parts.includes(group)
+}
 
 /**
  * 发现页（对齐 legado ExploreFragment / ExploreAdapter）。
@@ -92,6 +105,7 @@ export const useExploreStore = defineStore('explore', () => {
   const sourceStore = useSourceStore()
 
   const activeSourceUrl = ref<string>('')
+  const activeSourceGroup = ref<string>('')
   const activeCategoryUrl = ref<string>('')
   const kinds = ref<ExploreKind[]>([])
   const categoriesLoading = ref(false)
@@ -143,6 +157,19 @@ export const useExploreStore = defineStore('explore', () => {
   const exploreSources = computed(() => {
     return sourceStore.sources.filter(
       (s: BookSource) => s.enabled !== false && s.enabledExplore && s.exploreUrl,
+    )
+  })
+
+  const exploreSourceGroups = computed(() => getBookSourceGroups(exploreSources.value))
+
+  const hasUngroupedExploreSources = computed(() =>
+    exploreSources.value.some((source) => sourceHasGroup(source, EXPLORE_UNGROUPED_VALUE)),
+  )
+
+  const filteredExploreSources = computed(() => {
+    if (!activeSourceGroup.value) return exploreSources.value
+    return exploreSources.value.filter((source) =>
+      sourceHasGroup(source, activeSourceGroup.value),
     )
   })
 
@@ -469,7 +496,21 @@ export const useExploreStore = defineStore('explore', () => {
   }
 
   async function ensureActiveSource() {
-    if (exploreSources.value.length === 0) {
+    if (
+      activeSourceGroup.value
+      && activeSourceGroup.value !== EXPLORE_UNGROUPED_VALUE
+      && !exploreSourceGroups.value.includes(activeSourceGroup.value)
+    ) {
+      activeSourceGroup.value = ''
+    } else if (
+      activeSourceGroup.value === EXPLORE_UNGROUPED_VALUE
+      && !hasUngroupedExploreSources.value
+    ) {
+      activeSourceGroup.value = ''
+    }
+
+    const candidates = filteredExploreSources.value
+    if (candidates.length === 0) {
       categoriesToken += 1
       activeSourceUrl.value = ''
       activeCategoryUrl.value = ''
@@ -481,16 +522,32 @@ export const useExploreStore = defineStore('explore', () => {
       return
     }
 
-    const activeSourceStillValid = exploreSources.value.some(
+    const activeSourceStillValid = candidates.some(
       (source) => source.bookSourceUrl === activeSourceUrl.value,
     )
     if (!activeSourceUrl.value || !activeSourceStillValid) {
-      await setSource(exploreSources.value[0].bookSourceUrl)
+      await setSource(candidates[0].bookSourceUrl)
       return
     }
 
     if (!kinds.value.length) {
       await refreshCategories(false)
+    }
+  }
+
+  async function setSourceGroup(group: string) {
+    if (activeSourceGroup.value === group) return
+    activeSourceGroup.value = group
+    const candidates = filteredExploreSources.value
+    if (candidates.length === 0) {
+      await ensureActiveSource()
+      return
+    }
+    const stillVisible = candidates.some(
+      (source) => source.bookSourceUrl === activeSourceUrl.value,
+    )
+    if (!stillVisible) {
+      await setSource(candidates[0].bookSourceUrl)
     }
   }
 
@@ -607,6 +664,7 @@ export const useExploreStore = defineStore('explore', () => {
 
   return {
     activeSourceUrl,
+    activeSourceGroup,
     activeCategoryUrl,
     kinds,
     categories,
@@ -631,6 +689,9 @@ export const useExploreStore = defineStore('explore', () => {
     hasMore,
     error,
     exploreSources,
+    exploreSourceGroups,
+    hasUngroupedExploreSources,
+    filteredExploreSources,
     currentSource,
     valueOf,
     optionsOf,
@@ -640,6 +701,7 @@ export const useExploreStore = defineStore('explore', () => {
     setText,
     pressButton,
     init,
+    setSourceGroup,
     setSource,
     setCategory,
     fetchMore,

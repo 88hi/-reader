@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { useBookshelfStore } from './bookshelf'
+import { normalizeBookColumns, useBookshelfStore } from './bookshelf'
 import {
   getBookshelfWithCacheInfo,
   getBookGroups,
@@ -460,3 +460,48 @@ describe('书架排序', () => {
     expect(getBookshelfWithCacheInfo).toHaveBeenLastCalledWith({})
   })
 })
+
+describe('书架每排显示数量', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    })
+  })
+
+  it('规范化列数配置，非法值回退为自动(0)', () => {
+    expect(normalizeBookColumns(0)).toBe(0)
+    expect(normalizeBookColumns(3)).toBe(0)
+    expect(normalizeBookColumns(4)).toBe(4)
+    expect(normalizeBookColumns(6)).toBe(6)
+    expect(normalizeBookColumns(8)).toBe(8)
+    expect(normalizeBookColumns(-1)).toBe(0)
+    expect(normalizeBookColumns(9)).toBe(0)
+    expect(normalizeBookColumns(Number.NaN)).toBe(0)
+  })
+
+  it('默认自动列数，修改后持久化到 localStorage', () => {
+    const store = useBookshelfStore()
+    expect(store.gridColumns).toBe(0)
+
+    store.setGridColumns(4)
+    expect(store.gridColumns).toBe(4)
+    expect(localStorage.setItem).toHaveBeenCalledWith('bookshelf-columns', '4')
+
+    store.setGridColumns(99)
+    expect(store.gridColumns).toBe(0)
+    expect(localStorage.setItem).toHaveBeenCalledWith('bookshelf-columns', '0')
+  })
+
+  it('初始化时从 localStorage 恢复已保存的每排列数', () => {
+    vi.mocked(localStorage.getItem).mockImplementation((key) =>
+      key === 'bookshelf-columns' ? '5' : null,
+    )
+
+    const store = useBookshelfStore()
+    expect(store.gridColumns).toBe(5)
+  })
+})
+

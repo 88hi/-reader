@@ -10,16 +10,21 @@
         <div class="source-selector" v-if="store.exploreSources.length > 0">
           <select
             class="field source-select"
-            :value="store.activeSourceUrl"
+            aria-label="书源分组"
+            :value="store.activeSourceGroup"
             :disabled="store.categoriesLoading"
-            @change="onSourceChange"
+            @change="onGroupChange"
           >
+            <option value="">全部书源 ({{ store.exploreSources.length }})</option>
             <option
-              v-for="src in store.exploreSources"
-              :key="src.bookSourceUrl"
-              :value="src.bookSourceUrl"
+              v-for="group in store.exploreSourceGroups"
+              :key="group"
+              :value="group"
             >
-              {{ src.bookSourceName }}
+              {{ group }}
+            </option>
+            <option v-if="store.hasUngroupedExploreSources" :value="EXPLORE_UNGROUPED_VALUE">
+              未分组
             </option>
           </select>
         </div>
@@ -132,6 +137,27 @@
     </header>
 
     <div class="explore-body">
+      <!-- 左侧书源栏：显示当前选中书源分组下的所有发现书源 -->
+      <aside class="sources-panel" v-if="store.exploreSources.length > 0" aria-label="书源列表">
+        <div class="sources-scroll" v-if="store.filteredExploreSources.length > 0">
+          <button
+            v-for="src in store.filteredExploreSources"
+            :key="src.bookSourceUrl"
+            type="button"
+            class="source-tag"
+            :class="{ active: store.activeSourceUrl === src.bookSourceUrl }"
+            :title="src.bookSourceName"
+            :disabled="store.categoriesLoading && store.activeSourceUrl !== src.bookSourceUrl"
+            @click="onSourceSelect(src.bookSourceUrl)"
+          >
+            {{ src.bookSourceName }}
+          </button>
+        </div>
+        <div class="sources-scroll" v-else>
+          <div class="category-hint">当前分组暂无书源</div>
+        </div>
+      </aside>
+
       <!-- 桌面端侧边分类 / 移动端顶部分类滑动条 -->
       <aside class="categories-panel">
         <div class="categories-scroll" v-if="store.categoryItems.length > 0">
@@ -211,7 +237,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useExploreStore } from '../stores/explore'
+import { EXPLORE_UNGROUPED_VALUE, useExploreStore } from '../stores/explore'
 import { useReaderStore } from '../stores/reader'
 import { saveBook } from '../api/bookshelf'
 import { useAppStore } from '../stores/app'
@@ -289,12 +315,19 @@ watch(
   { deep: false },
 )
 
-function onSourceChange(event: Event) {
+function onGroupChange(event: Event) {
+  clearTextTimers()
+  coverCacheSession.release(shelfStore.books)
+  void store.setSourceGroup((event.target as HTMLSelectElement).value)
+}
+
+function onSourceSelect(sourceUrl: string) {
+  if (store.activeSourceUrl === sourceUrl) return
   // 切源时丢弃未触发的输入防抖: 它们的 action 属于上一个源，落定后会被
   // runAction 打到新源上（旧 kind 对新源无意义）。
   clearTextTimers()
   coverCacheSession.release(shelfStore.books)
-  void store.setSource((event.target as HTMLSelectElement).value)
+  void store.setSource(sourceUrl)
 }
 
 /** 清空所有待触发的输入防抖计时器。 */
@@ -567,9 +600,10 @@ function handleBookInfo(book: Book | SearchBook) {
 .source-selector {
   display: flex;
   align-items: center;
-  min-width: 0;
-  flex: 1;
-  max-width: 420px;
+  min-width: 140px;
+  width: 180px;
+  max-width: 200px;
+  flex-shrink: 0;
 }
 
 /* 登录按钮：与分类同宽度的控件，靠主色区分出它是"动作"而非"筛选" */
@@ -717,9 +751,63 @@ function handleBookInfo(book: Book | SearchBook) {
   overflow: hidden;
 }
 
+.sources-panel {
+  flex-shrink: 0;
+  width: 172px;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  padding: var(--space-2);
+  scrollbar-width: thin;
+}
+
+.sources-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.source-tag {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.source-tag:hover:not(.active):not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.source-tag:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.source-tag.active {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  color: color-mix(in srgb, var(--color-primary) 55%, var(--color-text));
+  font-weight: 600;
+}
+
 .categories-panel {
   flex-shrink: 0;
-  width: 188px;
+  width: 164px;
   border-right: 1px solid var(--color-border);
   background: var(--color-bg-elevated);
   overflow-y: auto;
@@ -883,11 +971,11 @@ function handleBookInfo(book: Book | SearchBook) {
   }
 
   .source-selector {
-    max-width: none;
-    order: 3;
-    width: 100%;
+    width: 160px;
+    max-width: 180px;
   }
 
+  .sources-panel,
   .categories-panel {
     width: 100%;
     border-right: none;
@@ -898,6 +986,7 @@ function handleBookInfo(book: Book | SearchBook) {
     padding: var(--space-2) var(--space-3);
   }
 
+  .sources-scroll,
   .categories-scroll {
     flex-direction: row;
     gap: var(--space-2);
@@ -909,8 +998,10 @@ function handleBookInfo(book: Book | SearchBook) {
     white-space: nowrap;
   }
 
+  .source-tag,
   .category-tag {
     width: auto;
+    flex-shrink: 0;
     white-space: nowrap;
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--color-border);
@@ -920,6 +1011,7 @@ function handleBookInfo(book: Book | SearchBook) {
 
   /* 窄屏沿用桌面版的就地写法: 同样不能换成 soft 令牌(原因见上方 .category-tag.active),
    * 且媒体查询不提升特异性, 若这里另起一套值, 桌面/窄屏会出现两种颜色。 */
+  .source-tag.active,
   .category-tag.active {
     background: color-mix(in srgb, var(--color-primary) 14%, transparent);
     color: color-mix(in srgb, var(--color-primary) 55%, var(--color-text));

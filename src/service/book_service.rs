@@ -2995,6 +2995,115 @@ impl BookService {
         Ok(book)
     }
 
+    /// 保存新导入的本地书籍：若书架上已存在同名书籍（无论本地还是网络书），
+    /// 则将其合并到原有条目中，避免重复生成一本。
+    ///
+    /// 若被合并的原有条目是另一份本地书文件（`book_url` 不同），返回该旧条目，
+    /// 供调用方清理旧的本地文件。
+    pub async fn save_imported_local_book(
+        &self,
+        user_ns: &str,
+        mut book: Book,
+    ) -> Result<(Book, Option<Book>), AppError> {
+        sanitize_book_urls(&mut book);
+        if book.origin.trim().is_empty() {
+            return Err(AppError::BadRequest("missing origin".to_string()));
+        }
+        if book.book_url.trim().is_empty() {
+            return Err(AppError::BadRequest("bookUrl required".to_string()));
+        }
+        if book.intro.as_deref() == Some("") {
+            book.intro = None;
+        }
+
+        apply_book_read_config_override(&mut book);
+        let _write_guard = self.bookshelf_write_lock.lock().await;
+        let mut list = self.read_bookshelf(user_ns).await?;
+
+        let incoming_name = normalize_book_name(&book.name);
+        let exist_idx = list
+            .iter()
+            .position(|b| b.book_url == book.book_url)
+            .or_else(|| {
+                if incoming_name.is_empty() {
+                    return None;
+                }
+                list.iter()
+                    .position(|b| normalize_book_name(&b.name) == incoming_name)
+            });
+
+        let mut replaced_local = None;
+        if let Some(i) = exist_idx {
+            let exist = list[i].clone();
+            merge_book_read_config(&exist, &mut book);
+            merge_book_source_candidates(&exist, &mut book);
+
+            // 保留原有阅读进度：本地导入默认初始化为第 0 章第 0 位置，不能覆盖已有进度。
+            if let Some(idx) = exist.dur_chapter_index {
+                let clamped = match book.total_chapter_num {
+                    Some(total) if total > 0 => idx.min(total - 1),
+                    _ => idx,
+                };
+                book.dur_chapter_index = Some(clamped);
+            }
+            if exist.dur_chapter_title.is_some() {
+                book.dur_chapter_title = exist.dur_chapter_title.clone();
+            }
+            if exist.dur_chapter_time.is_some() {
+                book.dur_chapter_time = exist.dur_chapter_time;
+            }
+            if exist.dur_chapter_pos.is_some() {
+                book.dur_chapter_pos = exist.dur_chapter_pos;
+            }
+            if book.total_chapter_num.is_none() {
+                book.total_chapter_num = exist.total_chapter_num;
+            }
+            if book.last_check_time.is_none() {
+                book.last_check_time = exist.last_check_time;
+            }
+            if book.group.is_none() {
+                book.group = exist.group;
+            }
+            if book.order.is_none() {
+                book.order = exist.order;
+            }
+            if book.cover_url.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                book.cover_url = exist.cover_url.clone();
+            }
+            if book.intro.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                book.intro = exist.intro.clone();
+            }
+            let incoming_author = book.author.trim();
+            let existing_author = exist.author.trim();
+            if (incoming_author.is_empty() || incoming_author == "本地导入")
+                && !existing_author.is_empty()
+                && existing_author != "本地导入"
+            {
+                book.author = exist.author.clone();
+            }
+            if book.original_name.is_none() {
+                book.original_name = exist.original_name.clone();
+            }
+            if book.original_author.is_none() {
+                book.original_author = exist.original_author.clone();
+            }
+            if book.original_intro.is_none() {
+                book.original_intro = exist.original_intro.clone();
+            }
+
+            if exist.book_url != book.book_url && is_local_book(&exist) {
+                replaced_local = Some(exist);
+            }
+            list[i] = book.clone();
+        } else {
+            ensure_current_source_candidate(&mut book);
+            list.push(book.clone());
+        }
+
+        self.write_bookshelf(user_ns, &list).await?;
+        Ok((book, replaced_local))
+    }
+
     pub async fn save_books(&self, user_ns: &str, books: Vec<Book>) -> Result<Vec<Book>, AppError> {
         let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut normalized = Vec::with_capacity(books.len());
@@ -6681,6 +6790,87 @@ mod tests {
             std::fs::read(cover_dir.join(&content_files[0])).unwrap(),
             data
         );
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    #[tokio::test]
+    async fn save_imported_local_book_merges_with_same_name_books() {
+        let storage_dir = std::env::temp_dir().join(format!(
+            "reader-local-merge-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let service = BookService::new(
+            HttpClient::new(15, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(storage_dir.join("cache")),
+            storage_dir.to_str().unwrap(),
+        );
+
+        let mut existing = Book::new(
+            "https://example.com/book/1".to_string(),
+            "https://example.com".to_string(),
+            "遮天".to_string(),
+            "辰东".to_string(),
+        );
+        existing.group = Some(4);
+        existing.order = Some(2);
+        existing.dur_chapter_index = Some(12);
+        existing.dur_chapter_title = Some("第13章".to_string());
+        existing.dur_chapter_pos = Some(300);
+        existing.cover_url = Some("https://example.com/cover.jpg".to_string());
+        existing.intro = Some("九龙拉棺".to_string());
+        service.save_book("default", existing).await.unwrap();
+
+        let mut imported_txt = Book::new(
+            "local-txt:abc123".to_string(),
+            "local-txt".to_string(),
+            " 遮 天 ".to_string(),
+            "本地导入".to_string(),
+        );
+        imported_txt.total_chapter_num = Some(50);
+        imported_txt.dur_chapter_index = Some(0);
+        imported_txt.dur_chapter_pos = Some(0);
+
+        let (merged, replaced) = service
+            .save_imported_local_book("default", imported_txt)
+            .await
+            .unwrap();
+        assert!(replaced.is_none(), "原书为网络书，不需要清理本地文件");
+        assert_eq!(merged.book_url, "local-txt:abc123");
+        assert_eq!(merged.author, "辰东");
+        assert_eq!(merged.group, Some(4));
+        assert_eq!(merged.order, Some(2));
+        assert_eq!(merged.dur_chapter_index, Some(12));
+        assert_eq!(merged.dur_chapter_pos, Some(300));
+        assert_eq!(merged.cover_url.as_deref(), Some("https://example.com/cover.jpg"));
+        assert_eq!(merged.intro.as_deref(), Some("九龙拉棺"));
+
+        let shelf = service.get_bookshelf("default").await.unwrap();
+        assert_eq!(shelf.len(), 1, "同名书应合并，不应生成第二本");
+
+        // 再次导入同名 EPUB：应合并并把旧的 local-txt 返回以供清理
+        let mut imported_epub = Book::new(
+            "local-epub:def456".to_string(),
+            "local-epub".to_string(),
+            "遮天".to_string(),
+            "本地导入".to_string(),
+        );
+        imported_epub.total_chapter_num = Some(10);
+        imported_epub.dur_chapter_index = Some(0);
+        imported_epub.dur_chapter_pos = Some(0);
+
+        let (merged2, replaced2) = service
+            .save_imported_local_book("default", imported_epub)
+            .await
+            .unwrap();
+        assert_eq!(
+            replaced2.as_ref().map(|b| b.book_url.as_str()),
+            Some("local-txt:abc123")
+        );
+        assert_eq!(merged2.book_url, "local-epub:def456");
+        assert_eq!(merged2.dur_chapter_index, Some(9), "章节数变少时进度应钳位到末章");
+        assert_eq!(service.get_bookshelf("default").await.unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(storage_dir);
     }

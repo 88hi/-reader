@@ -29,6 +29,43 @@ import { getSourceCandidateCache, sourceCandidateBookKey } from '../utils/source
 /** 书架排序方式的存储键。与 Legado 的 `bookshelfSort` 偏好同名同义。 */
 const BOOK_SORT_KEY = 'bookshelf-sort'
 
+/** 书架每排显示书籍数量的存储键；0 表示自动适配容器宽度。 */
+const BOOK_COLUMNS_KEY = 'bookshelf-columns'
+
+export const BOOK_COLUMN_OPTIONS = [
+  { value: 0, label: '自动' },
+  { value: 4, label: '4 本/排' },
+  { value: 5, label: '5 本/排' },
+  { value: 6, label: '6 本/排' },
+  { value: 7, label: '7 本/排' },
+  { value: 8, label: '8 本/排' },
+] as const
+
+export function normalizeBookColumns(raw: unknown): number {
+  const num = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isFinite(num)) return 0
+  const rounded = Math.round(num)
+  if (rounded === 0) return 0
+  if (rounded < 4 || rounded > 8) return 0
+  return rounded
+}
+
+function readStoredColumns(): number {
+  try {
+    return normalizeBookColumns(localStorage.getItem(BOOK_COLUMNS_KEY))
+  } catch {
+    return 0
+  }
+}
+
+function writeStoredColumns(value: number) {
+  try {
+    localStorage.setItem(BOOK_COLUMNS_KEY, String(normalizeBookColumns(value)))
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
+
 /** 读取持久化的排序方式; 存储不可用或值非法时回落到默认。
  *
  *  「手动排序」已从菜单下架, 存量的 3 在这里直接迁移到默认档并写回 —— 否则
@@ -60,6 +97,13 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   const books = ref<Book[]>([])
   const recentBooks = ref<Book[]>([])
   const loading = ref(false)
+  const gridColumns = ref<number>(readStoredColumns())
+
+  function setGridColumns(value: number) {
+    const next = normalizeBookColumns(value)
+    gridColumns.value = next
+    writeStoredColumns(next)
+  }
   /** 是否成功拉过一次书架。
    *
    *  给阅读页的「加入书架」入口用：`books` 为空既可能是「书架真的空」，也可能
@@ -568,6 +612,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
 
   return {
     books, recentBooks, loading, loaded, sorting,
+    gridColumns, setGridColumns,
     fetchBooks, addBook, removeBook,
     refreshRecentBooks, removeRecentBook, clearAllRecentBooks,
     groups, activeGroupId, displayGroups, visibleGroups, filteredBooks,
