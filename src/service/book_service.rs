@@ -6807,30 +6807,32 @@ mod tests {
             storage_dir.to_str().unwrap(),
         );
 
-        let mut existing = Book::new(
-            "https://example.com/book/1".to_string(),
-            "https://example.com".to_string(),
-            "遮天".to_string(),
-            "辰东".to_string(),
-        );
-        existing.group = Some(4);
-        existing.order = Some(2);
-        existing.dur_chapter_index = Some(12);
-        existing.dur_chapter_title = Some("第13章".to_string());
-        existing.dur_chapter_pos = Some(300);
-        existing.cover_url = Some("https://example.com/cover.jpg".to_string());
-        existing.intro = Some("九龙拉棺".to_string());
+        let existing = Book {
+            book_url: "https://example.com/book/1".to_string(),
+            origin: "https://example.com".to_string(),
+            name: "遮天".to_string(),
+            author: "辰东".to_string(),
+            group: Some(4),
+            order: Some(2),
+            dur_chapter_index: Some(12),
+            dur_chapter_title: Some("第13章".to_string()),
+            dur_chapter_pos: Some(300),
+            cover_url: Some("https://example.com/cover.jpg".to_string()),
+            intro: Some("九龙拉棺".to_string()),
+            ..Default::default()
+        };
         service.save_book("default", existing).await.unwrap();
 
-        let mut imported_txt = Book::new(
-            "local-txt:abc123".to_string(),
-            "local-txt".to_string(),
-            " 遮 天 ".to_string(),
-            "本地导入".to_string(),
-        );
-        imported_txt.total_chapter_num = Some(50);
-        imported_txt.dur_chapter_index = Some(0);
-        imported_txt.dur_chapter_pos = Some(0);
+        let imported_txt = Book {
+            book_url: "local-txt:abc123".to_string(),
+            origin: "local-txt".to_string(),
+            name: " 遮 天 ".to_string(),
+            author: "本地导入".to_string(),
+            total_chapter_num: Some(50),
+            dur_chapter_index: Some(0),
+            dur_chapter_pos: Some(0),
+            ..Default::default()
+        };
 
         let (merged, replaced) = service
             .save_imported_local_book("default", imported_txt)
@@ -6850,15 +6852,16 @@ mod tests {
         assert_eq!(shelf.len(), 1, "同名书应合并，不应生成第二本");
 
         // 再次导入同名 EPUB：应合并并把旧的 local-txt 返回以供清理
-        let mut imported_epub = Book::new(
-            "local-epub:def456".to_string(),
-            "local-epub".to_string(),
-            "遮天".to_string(),
-            "本地导入".to_string(),
-        );
-        imported_epub.total_chapter_num = Some(10);
-        imported_epub.dur_chapter_index = Some(0);
-        imported_epub.dur_chapter_pos = Some(0);
+        let imported_epub = Book {
+            book_url: "local-epub:def456".to_string(),
+            origin: "local-epub".to_string(),
+            name: "遮天".to_string(),
+            author: "本地导入".to_string(),
+            total_chapter_num: Some(10),
+            dur_chapter_index: Some(0),
+            dur_chapter_pos: Some(0),
+            ..Default::default()
+        };
 
         let (merged2, replaced2) = service
             .save_imported_local_book("default", imported_epub)
