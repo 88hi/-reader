@@ -229,7 +229,7 @@
                 class="horizontal-page"
                 :style="{
                   transform: horizontalPageTransform(idx),
-                  transitionDuration: horizontalPageTransitionDuration,
+                  transitionDuration: isDualPageActive ? '0ms' : horizontalPageTransitionDuration,
                   willChange: horizontalPageWillChange(idx),
                   userSelect: 'text',
                   WebkitUserSelect: 'text',
@@ -244,12 +244,46 @@
                 ></div>
               </section>
               <div
-                v-if="isDualPageActive && dualPageFlipActive"
+                v-if="isDualPageActive && dualPageFlipActive && dualFlipSnapshot"
                 :key="`dual-flip-${dualPageFlipKey}`"
-                class="dual-page-flip-leaf"
-                :class="`is-${dualPageFlipDir}`"
+                class="dual-book-flip-stage"
+                :style="{
+                  background: theme.body,
+                  '--dual-flip-duration': `${dualPageFlipDuration}ms`,
+                }"
                 aria-hidden="true"
-              ></div>
+              >
+                <div class="dual-book-under is-left" :style="{ background: theme.body }">
+                  <div
+                    class="chapter-text horizontal-page-content"
+                    :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
+                    v-html="dualFlipSnapshot.underLeft"
+                  ></div>
+                </div>
+                <div class="dual-book-under is-right" :style="{ background: theme.body }">
+                  <div
+                    class="chapter-text horizontal-page-content"
+                    :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
+                    v-html="dualFlipSnapshot.underRight"
+                  ></div>
+                </div>
+                <div class="dual-book-leaf" :class="`is-${dualPageFlipDir}`">
+                  <div class="dual-book-leaf-face is-front" :style="{ background: theme.body }">
+                    <div
+                      class="chapter-text horizontal-page-content"
+                      :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
+                      v-html="dualFlipSnapshot.leafFront"
+                    ></div>
+                  </div>
+                  <div class="dual-book-leaf-face is-back" :style="{ background: theme.body }">
+                    <div
+                      class="chapter-text horizontal-page-content"
+                      :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
+                      v-html="dualFlipSnapshot.leafBack"
+                    ></div>
+                  </div>
+                </div>
+              </div>
             </div>
           </section>
         </div>
@@ -1763,19 +1797,41 @@ function beginHorizontalPageTurnGuard() {
 const dualPageFlipActive = ref(false)
 const dualPageFlipDir = ref<'next' | 'prev'>('next')
 const dualPageFlipKey = ref(0)
+const dualPageFlipDuration = ref(360)
+const dualFlipSnapshot = ref<{
+  underLeft: string
+  underRight: string
+  leafFront: string
+  leafBack: string
+} | null>(null)
 let dualPageFlipTimer: number | null = null
 
 watch(horizontalPageIndex, (next, prev) => {
   if (!isDualPageActive.value || horizontalJumpInProgress.value || next === prev) return
-  if (Number(config.value.animateDuration) <= 0) return
-  dualPageFlipDir.value = next > prev ? 'next' : 'prev'
+  const duration = Number(config.value.animateDuration)
+  if (!Number.isFinite(duration) || duration <= 0) return
+  const oldStart = getReaderSpreadStart(prev, 2)
+  const newStart = getReaderSpreadStart(next, 2)
+  if (oldStart === newStart) return
+  const pages = horizontalPages.value
+  const oldLeft = pages[oldStart] || ''
+  const oldRight = pages[oldStart + 1] || ''
+  const newLeft = pages[newStart] || ''
+  const newRight = pages[newStart + 1] || ''
+  const isNext = newStart > oldStart
+  dualPageFlipDir.value = isNext ? 'next' : 'prev'
+  dualFlipSnapshot.value = isNext
+    ? { underLeft: oldLeft, underRight: newRight, leafFront: oldRight, leafBack: newLeft }
+    : { underLeft: newLeft, underRight: oldRight, leafFront: oldLeft, leafBack: newRight }
+  dualPageFlipDuration.value = Math.max(180, Math.min(1200, Math.round(duration)))
   dualPageFlipKey.value += 1
   dualPageFlipActive.value = true
   if (dualPageFlipTimer !== null) window.clearTimeout(dualPageFlipTimer)
   dualPageFlipTimer = window.setTimeout(() => {
     dualPageFlipTimer = null
     dualPageFlipActive.value = false
-  }, 380)
+    dualFlipSnapshot.value = null
+  }, dualPageFlipDuration.value + 30)
 })
 
 /** 把某个搜索命中的高亮定位到视野内 —— 左右分页下就是"换到它所在的那一页"。
@@ -4786,72 +4842,124 @@ watch(
   z-index: 4;
 }
 
-.dual-page-flip-leaf {
+.dual-book-flip-stage {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  perspective: 2200px;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.dual-book-under {
   position: absolute;
   top: 0;
   bottom: 0;
   width: 50%;
-  pointer-events: none;
-  z-index: 6;
-  will-change: transform, opacity;
-  border-radius: 2px;
+  padding: var(--reader-page-vertical-padding) var(--reader-side-padding);
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
-.dual-page-flip-leaf.is-next {
+.dual-book-under.is-left {
+  left: 0;
+}
+
+.dual-book-under.is-right {
+  left: 50%;
+}
+
+.dual-book-leaf {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  transform-style: preserve-3d;
+  will-change: transform;
+  z-index: 2;
+}
+
+.dual-book-leaf.is-next {
   left: 50%;
   transform-origin: left center;
-  background: linear-gradient(
-    90deg,
-    rgba(0, 0, 0, 0.2) 0%,
-    rgba(255, 255, 255, 0.14) 14%,
-    rgba(128, 128, 128, 0.08) 58%,
-    rgba(0, 0, 0, 0.14) 100%
-  );
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.22);
-  animation: dualBookFlipNext 360ms cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+  animation: dualBookFlipNext var(--dual-flip-duration, 360ms) cubic-bezier(0.24, 0.58, 0.32, 1) forwards;
 }
 
-.dual-page-flip-leaf.is-prev {
+.dual-book-leaf.is-prev {
   left: 0;
   transform-origin: right center;
-  background: linear-gradient(
-    270deg,
-    rgba(0, 0, 0, 0.2) 0%,
-    rgba(255, 255, 255, 0.14) 14%,
-    rgba(128, 128, 128, 0.08) 58%,
-    rgba(0, 0, 0, 0.14) 100%
-  );
-  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.22);
-  animation: dualBookFlipPrev 360ms cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+  animation: dualBookFlipPrev var(--dual-flip-duration, 360ms) cubic-bezier(0.24, 0.58, 0.32, 1) forwards;
+}
+
+.dual-book-leaf-face {
+  position: absolute;
+  inset: 0;
+  padding: var(--reader-page-vertical-padding) var(--reader-side-padding);
+  box-sizing: border-box;
+  overflow: hidden;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.dual-book-leaf-face.is-front::after,
+.dual-book-leaf-face.is-back::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.dual-book-leaf.is-next .dual-book-leaf-face.is-front::after {
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.16) 0%, transparent 18%, rgba(0, 0, 0, 0.08) 100%);
+}
+
+.dual-book-leaf.is-next .dual-book-leaf-face.is-back {
+  transform: rotateY(180deg);
+}
+
+.dual-book-leaf.is-next .dual-book-leaf-face.is-back::after {
+  background: linear-gradient(270deg, rgba(0, 0, 0, 0.16) 0%, transparent 18%, rgba(0, 0, 0, 0.08) 100%);
+}
+
+.dual-book-leaf.is-prev .dual-book-leaf-face.is-front::after {
+  background: linear-gradient(270deg, rgba(0, 0, 0, 0.16) 0%, transparent 18%, rgba(0, 0, 0, 0.08) 100%);
+}
+
+.dual-book-leaf.is-prev .dual-book-leaf-face.is-back {
+  transform: rotateY(-180deg);
+}
+
+.dual-book-leaf.is-prev .dual-book-leaf-face.is-back::after {
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.16) 0%, transparent 18%, rgba(0, 0, 0, 0.08) 100%);
 }
 
 @keyframes dualBookFlipNext {
   0% {
     transform: rotateY(0deg);
-    opacity: 0.9;
+    box-shadow: -4px 0 18px rgba(0, 0, 0, 0.16);
   }
-  48% {
-    transform: rotateY(-92deg);
-    opacity: 1;
+  50% {
+    transform: rotateY(-90deg);
+    box-shadow: -16px 0 36px rgba(0, 0, 0, 0.34);
   }
   100% {
     transform: rotateY(-180deg);
-    opacity: 0;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.12);
   }
 }
 
 @keyframes dualBookFlipPrev {
   0% {
     transform: rotateY(0deg);
-    opacity: 0.9;
+    box-shadow: 4px 0 18px rgba(0, 0, 0, 0.16);
   }
-  48% {
-    transform: rotateY(92deg);
-    opacity: 1;
+  50% {
+    transform: rotateY(90deg);
+    box-shadow: 16px 0 36px rgba(0, 0, 0, 0.34);
   }
   100% {
     transform: rotateY(180deg);
-    opacity: 0;
+    box-shadow: -4px 0 16px rgba(0, 0, 0, 0.12);
   }
 }
 

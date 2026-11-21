@@ -112,6 +112,7 @@
           class="candidate"
           :class="{ active: selectedCandidate?.book.bookUrl === item.book.bookUrl && selectedCandidate?.book.origin === item.book.origin }"
           @click="selectCandidate(item, true)"
+          @contextmenu.prevent="handleCandidateSourceContextMenu(item, $event)"
         >
           <span class="candidate-rail" aria-hidden="true"></span>
           <span class="candidate-body">
@@ -198,7 +199,7 @@
       </div>
     </Transition>
 
-    <!-- 右侧目录预览面板：点击候选书源展开，点击章节直接换源阅读且左侧继续搜索 -->
+    <!-- 右侧目录预览面板：点击候选书源展开，悬停章节右侧预览正文，点击章节直接换源阅读且左侧继续搜索 -->
     <Teleport to="body">
       <Transition name="toc-slide">
         <aside
@@ -212,7 +213,7 @@
               <span class="toc-drawer-title">{{ sourceNameByOrigin(selectedCandidate.book.origin) }}</span>
               <span v-if="candidateChapters.length" class="toc-drawer-count">共 {{ candidateChapters.length }} 章</span>
             </div>
-            <button class="close-btn" type="button" title="关闭目录" aria-label="关闭目录" @click="tocDrawerOpen = false">
+            <button class="close-btn" type="button" title="关闭目录" aria-label="关闭目录" @click="closeTocDrawer">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
                 <path d="M6 6l12 12M18 6L6 18" />
               </svg>
@@ -234,13 +235,45 @@
               :key="`${chapter.index}-${chapter.url}`"
               type="button"
               class="toc-drawer-item"
+              :class="{ active: hoveredChapter?.url === chapter.url && hoveredChapter?.index === chapter.index }"
               :disabled="isSwitchingSource"
+              @mouseenter="scheduleHoverChapterPreview(chapter)"
               @click="handleSwitchToChapter(chapter)"
             >
               <span class="toc-item-title">{{ chapter.title }}</span>
             </button>
           </div>
         </aside>
+      </Transition>
+      <Transition name="toc-slide">
+        <section
+          v-if="tocDrawerOpen && selectedCandidate && hoveredChapter"
+          class="candidate-content-preview"
+          :style="{ background: theme.popup, color: theme.fontColor, left: `${tocDrawerLeft + 340}px` }"
+          @click.stop
+        >
+          <div class="toc-drawer-header">
+            <div class="toc-drawer-title-group">
+              <span class="toc-drawer-title">{{ hoveredChapter.title }}</span>
+            </div>
+            <button
+              type="button"
+              class="preview-switch-btn"
+              :disabled="isSwitchingSource"
+              @click="handleSwitchToChapter(hoveredChapter)"
+            >
+              {{ isSwitchingSource ? '切换中…' : '切换到本章' }}
+            </button>
+          </div>
+          <div v-if="hoveredChapterLoading" class="loading">
+            <div class="spinner"></div>
+            <span>正在加载正文预览...</span>
+          </div>
+          <div v-else-if="hoveredChapterError" class="empty">{{ hoveredChapterError }}</div>
+          <div v-else class="preview-content-body">
+            <p v-for="(line, idx) in hoveredChapterParagraphs" :key="idx">{{ line }}</p>
+          </div>
+        </section>
       </Transition>
     </Teleport>
 
@@ -261,7 +294,9 @@ import { useAppStore } from '../../stores/app'
 import { useSourceStore } from '../../stores/source'
 import { getAvailableBookSourceSSE } from '../../api/search'
 import type { SseLike } from '../../api/sse'
-import { getBookInfo, getChapterList, getCoverUrl } from '../../api/bookshelf'
+import { getBookContent, getBookInfo, getChapterList, getCoverUrl } from '../../api/bookshelf'
+import { deleteBookSource, pinBookSource, saveBookSource } from '../../api/source'
+import { showContextMenu } from '../../composables/useContextMenu'
 import { getBookSourceGroups } from '../../utils/sourceSelection'
 import { matchesSourceSwitchTitle, mergeSourceCandidates, normalizeSourceSwitchAuthor, sourceCandidateKey } from '../../utils/searchRank'
 import {
@@ -335,6 +370,144 @@ const candidateChapters = ref<BookChapter[]>([])
 const candidateTocLoading = ref(false)
 const candidateTocError = ref('')
 let tocLoadToken = 0
+
+const hoveredChapter = ref<BookChapter | null>(null)
+const hoveredChapterContent = ref('')
+const hoveredChapterLoading = ref(false)
+const hoveredChapterError = ref('')
+const hoverPreviewCache = new Map<string, string>()
+let hoverPreviewTimer: number | null = null
+let hoverPreviewToken = 0
+
+const hoveredChapterParagraphs = computed(() =>
+  hoveredChapterContent.value
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean),
+)
+
+function resetHoverPreview() {
+  if (hoverPreviewTimer !== null) {
+    window.clearTimeout(hoverPreviewTimer)
+    hoverPreviewTimer = null
+  }
+  hoverPreviewToken += 1
+  hoveredChapter.value = null
+  hoveredChapterContent.value = ''
+  hoveredChapterLoading.value = false
+  hoveredChapterError.value = ''
+}
+
+function closeTocDrawer() {
+  tocDrawerOpen.value = false
+  resetHoverPreview()
+}
+
+function scheduleHoverChapterPreview(chapter: BookChapter) {
+  const candidate = selectedCandidate.value?.book
+  if (!candidate) return
+  if (hoveredChapter.value?.url === chapter.url && hoveredChapter.value?.index === chapter.index) return
+  hoveredChapter.value = chapter
+  hoveredChapterError.value = ''
+
+  const cacheKey = `${candidate.origin}::${chapter.url}`
+  const cached = hoverPreviewCache.get(cacheKey)
+  if (cached !== undefined) {
+    hoveredChapterContent.value = cached
+    hoveredChapterLoading.value = false
+    return
+  }
+
+  if (hoverPreviewTimer !== null) window.clearTimeout(hoverPreviewTimer)
+  hoveredChapterLoading.value = true
+  hoveredChapterContent.value = ''
+  const token = ++hoverPreviewToken
+  hoverPreviewTimer = window.setTimeout(async () => {
+    hoverPreviewTimer = null
+    try {
+      const content = await getBookContent({
+        bookUrl: candidate.bookUrl,
+        chapterUrl: chapter.url,
+        bookSourceUrl: candidate.origin,
+        chapterTitle: chapter.title,
+        index: chapter.index,
+      })
+      if (token !== hoverPreviewToken) return
+      const text = typeof content === 'string' ? content : ''
+      hoverPreviewCache.set(cacheKey, text)
+      hoveredChapterContent.value = text || '（本章暂无正文内容）'
+    } catch (e: unknown) {
+      if (token !== hoverPreviewToken) return
+      hoveredChapterError.value = (e as Error).message || '正文加载失败'
+    } finally {
+      if (token === hoverPreviewToken) {
+        hoveredChapterLoading.value = false
+      }
+    }
+  }, 240)
+}
+
+function handleCandidateSourceContextMenu(item: CandidateItem, event: MouseEvent) {
+  const origin = item.book.origin
+  const name = sourceNameByOrigin(origin)
+  const source = sourceStore.sources.find((s) => sourceKey(s.bookSourceUrl) === sourceKey(origin))
+  showContextMenu(event, [
+    {
+      label: '置顶书源',
+      action: async () => {
+        try {
+          await pinBookSource(origin)
+          await sourceStore.fetchSources()
+          appStore.showToast(`已置顶「${name}」`, 'success')
+        } catch (e: unknown) {
+          appStore.showToast((e as Error).message || '置顶书源失败', 'error')
+        }
+      },
+    },
+    {
+      label: '禁用此书源',
+      disabled: !source,
+      action: async () => {
+        if (!source) return
+        try {
+          await saveBookSource({ ...source, enabled: false })
+          await sourceStore.fetchSources()
+          appStore.showToast(`已禁用「${name}」`, 'success')
+        } catch (e: unknown) {
+          appStore.showToast((e as Error).message || '禁用书源失败', 'error')
+        }
+      },
+    },
+    {
+      label: '打开书源管理',
+      action: () => {
+        appStore.showSourceManager = true
+      },
+    },
+    {
+      label: '删除此书源',
+      danger: true,
+      divider: true,
+      action: async () => {
+        const ok = await appStore.confirmDialog(`确定删除书源「${name}」？此操作不可撤销。`, {
+          title: '删除书源',
+          danger: true,
+        })
+        if (!ok) return
+        try {
+          await deleteBookSource(origin)
+          await sourceStore.fetchSources()
+          appStore.showToast(`已删除「${name}」`, 'success')
+        } catch (e: unknown) {
+          appStore.showToast((e as Error).message || '删除书源失败', 'error')
+        }
+      },
+    },
+  ])
+}
 
 const listRef = ref<HTMLElement | null>(null)
 
@@ -497,6 +670,7 @@ watch(enabledSourceOrigins, (enabled) => {
 
 onUnmounted(() => {
   closeAvailableSourceSSE()
+  resetHoverPreview()
 })
 
 /** 打开面板 / 搜索书源。
@@ -778,6 +952,7 @@ async function loadCandidateToc(item: CandidateItem) {
 async function selectCandidate(item: CandidateItem, openToc = false) {
   selectedCandidate.value = item
   candidatePreview.value = null
+  resetHoverPreview()
   if (openToc) {
     updateTocDrawerLeft()
     tocDrawerOpen.value = true
@@ -795,7 +970,7 @@ async function handleSwitchToChapter(chapter: BookChapter) {
   const candidate = selectedCandidate.value?.book
   if (!candidate || isSwitchingSource.value) return
   // 换源查看该章节内容，同时保持左侧换源面板打开并继续搜索其它书源。
-  tocDrawerOpen.value = false
+  closeTocDrawer()
   try {
     await store.switchSource(candidate.bookUrl, candidate.origin, {
       keepPanelOpen: true,
@@ -810,7 +985,7 @@ async function handleSwitchToChapter(chapter: BookChapter) {
 function clearSelection() {
   selectedCandidate.value = null
   candidatePreview.value = null
-  tocDrawerOpen.value = false
+  closeTocDrawer()
 }
 
 /**
@@ -1571,8 +1746,96 @@ async function handleSwitch(res: SearchBook) {
   transition: background 0.14s ease;
 }
 
-.candidate-toc-drawer .toc-drawer-item:hover:not(:disabled) {
-  background: rgba(128, 128, 128, 0.14);
+.candidate-toc-drawer .toc-drawer-item:hover:not(:disabled),
+.candidate-toc-drawer .toc-drawer-item.active {
+  background: rgba(128, 128, 128, 0.16);
+}
+
+.candidate-content-preview {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  min-width: 280px;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid rgba(128, 128, 128, 0.18);
+  box-shadow: 12px 0 32px rgba(0, 0, 0, 0.28);
+}
+
+.candidate-content-preview .toc-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.14);
+  flex-shrink: 0;
+}
+
+.candidate-content-preview .toc-drawer-title-group {
+  min-width: 0;
+  flex: 1;
+}
+
+.candidate-content-preview .toc-drawer-title {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preview-switch-btn {
+  flex-shrink: 0;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--color-primary, #d97706);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.preview-switch-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.preview-content-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px 36px;
+  font-size: 15px;
+  line-height: 1.85;
+}
+
+.preview-content-body p {
+  margin: 0 0 1em;
+  text-indent: 2em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.candidate-content-preview .loading,
+.candidate-content-preview .empty {
+  padding: 40px 20px;
+  text-align: center;
+  font-size: 13px;
+  opacity: 0.7;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+@media (max-width: 1020px) {
+  .candidate-content-preview {
+    display: none;
+  }
 }
 
 .candidate-toc-drawer .toc-drawer-item:disabled {

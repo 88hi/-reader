@@ -19,6 +19,9 @@
             :test-completed="sourceTestProgress.completed"
             :test-total="sourceTestProgress.total"
             :invalid-count="invalidSources.length"
+            v-model:test-timeout-secs="sourceTestTimeoutSecs"
+            v-model:test-concurrent="sourceTestConcurrent"
+            v-model:test-keyword="sourceTestKeyword"
             @refresh="loadSources"
             @import-local="triggerFileImport"
             @open-subscriptions="subscriptionPanelVisible = true"
@@ -191,6 +194,22 @@ const activeTestMode = ref<BookSourceTestMode>('all')
 const sourceTestProgress = ref({ completed: 0, total: 0 })
 const sourceTestTaskId = ref('')
 const sourceTestStopRequested = ref(false)
+const sourceTestTimeoutSecs = ref<number>(
+  Math.max(5, Math.min(120, Number(localStorage.getItem('source-test-timeout-secs')) || 30)),
+)
+const sourceTestConcurrent = ref<number>(
+  Math.max(1, Math.min(8, Number(localStorage.getItem('source-test-concurrent')) || 4)),
+)
+const sourceTestKeyword = ref<string>(localStorage.getItem('source-test-keyword') || '')
+watch(sourceTestTimeoutSecs, (v) => {
+  try { localStorage.setItem('source-test-timeout-secs', String(v)) } catch { /* ignore */ }
+})
+watch(sourceTestConcurrent, (v) => {
+  try { localStorage.setItem('source-test-concurrent', String(v)) } catch { /* ignore */ }
+})
+watch(sourceTestKeyword, (v) => {
+  try { localStorage.setItem('source-test-keyword', v) } catch { /* ignore */ }
+})
 let stopSourceTestProgressListener: UnlistenFn | null = null
 const filterText = ref('')
 const filterGroup = ref('')
@@ -709,8 +728,9 @@ async function testSources(explicitTargets?: BookSource[], mode: BookSourceTestM
         await testBookSources({
           bookSourceUrls: batch,
           markInvalid: true,
-          // 与后端 clamp 后的上限一致(8): 设更高只会被截断, 反而误导。
-          concurrent: 8,
+          concurrent: sourceTestConcurrent.value,
+          timeoutSecs: sourceTestTimeoutSecs.value,
+          keyword: sourceTestKeyword.value.trim() || undefined,
           taskId: sourceTestTaskId.value,
           mode,
         })

@@ -95,6 +95,7 @@ export function testBookSources(params: {
   concurrent?: number
   taskId?: string
   mode?: BookSourceTestMode
+  timeoutSecs?: number
 }) {
   if ((params.bookSourceUrls?.length || 0) > MAX_SOURCE_TEST_BATCH_SIZE) {
     throw new Error(`单次最多测试 ${MAX_SOURCE_TEST_BATCH_SIZE} 个书源`)

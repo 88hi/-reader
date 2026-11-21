@@ -128,7 +128,7 @@ const props = withDefaults(defineProps<{
 const fixedColumns = computed(() => {
   const num = Number(props.columns)
   if (!Number.isFinite(num) || num <= 0) return 0
-  return Math.min(8, Math.max(4, Math.round(num)))
+  return Math.min(8, Math.max(1, Math.round(num)))
 })
 
 /** 过渡开关: 由 `animate` 的默认值决定, 未显式传 `false` 时为 true。 */

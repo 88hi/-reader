@@ -2296,6 +2296,10 @@ pub async fn search_book_multi_sse(
 
         let mut idx = last_index + 1;
         let mut last_idx = last_index;
+        let total_sources = sources.len();
+        let mut scanned_sources = idx.max(0) as usize;
+        let mut failed_sources = 0usize;
+        let mut last_progress_emit = std::time::Instant::now();
         // 当前书源页是否还有任何书源返回了结果。legado 用同一口径判断
         // 「滚动到底还能不能再拉一页」：只要本页有源返回非空，就让客户端
         // 继续请求下一页；下一页全空时自然停止。
@@ -2341,24 +2345,50 @@ pub async fn search_book_multi_sse(
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
             };
             if let Some(res) = next {
+                let mut emitted = false;
                 match res {
                     Ok((cur_idx, _source_name, Ok(list))) => {
                         // 任务完成顺序与书源下标无关, 不能直接覆盖: 先完成的
                         // 大下标会被后完成的小下标改回去, 前端续搜就会重复扫。
                         last_idx = last_idx.max(cur_idx);
+                        scanned_sources += 1;
                         if !list.is_empty() {
                             page_has_results = true;
-                            let payload = serde_json::json!({"event": "data", "lastIndex": cur_idx, "data": list});
+                            emitted = true;
+                            let payload = serde_json::json!({
+                                "event": "data",
+                                "lastIndex": cur_idx,
+                                "scanned": scanned_sources,
+                                "totalSources": total_sources,
+                                "failedCount": failed_sources,
+                                "data": list
+                            });
                             let _ = on_event.send(payload);
                         }
                     }
                     Ok((cur_idx, _source_name, Err(e))) => {
                         last_idx = last_idx.max(cur_idx);
+                        scanned_sources += 1;
+                        failed_sources += 1;
                         tracing::error!("search_book error from {}: {:?}", _source_name, e);
                     }
                     Err(e) => {
+                        scanned_sources += 1;
+                        failed_sources += 1;
                         tracing::error!("task join error: {:?}", e);
                     }
+                }
+                if !emitted && last_progress_emit.elapsed() >= std::time::Duration::from_millis(180) {
+                    last_progress_emit = std::time::Instant::now();
+                    let payload = serde_json::json!({
+                        "event": "data",
+                        "lastIndex": last_idx,
+                        "scanned": scanned_sources,
+                        "totalSources": total_sources,
+                        "failedCount": failed_sources,
+                        "data": []
+                    });
+                    let _ = on_event.send(payload);
                 }
             } else {
                 break;
@@ -2369,7 +2399,10 @@ pub async fn search_book_multi_sse(
             "event": "end",
             "lastIndex": last_idx,
             "hasMore": (idx as usize) < sources.len(),
-            "hasMorePages": page_has_results
+            "hasMorePages": page_has_results,
+            "scanned": scanned_sources,
+            "totalSources": total_sources,
+            "failedCount": failed_sources
         }));
     });
 

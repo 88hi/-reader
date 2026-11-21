@@ -5,9 +5,11 @@
         搜索 "{{ searchKey }}"
         <span v-if="isSearching" class="searching-indicator">
           <span class="dot-pulse"></span>
-          搜索中...
+          {{ searchProgressText }}
         </span>
-        <span v-else class="result-count">({{ rankedResults.length }} 个结果)</span>
+        <span v-else class="result-count">
+          ({{ rankedResults.length }} 个结果<template v-if="searchProgress.totalSources > 0"> · 已扫 {{ searchProgress.totalSources }} 个书源</template>)
+        </span>
         <!-- 结果来自会话缓存时标一下；点它可重搜。
              原来是单独一行提示条（"已显示上次的搜索结果 / 重新搜索"），既多占
              一行又容易被重复渲染，改成一枚可点的角标。 -->
@@ -104,21 +106,65 @@
         </div>
       </aside>
 
-      <div class="search-books-pane">
+      <div class="search-books-pane" :class="{ 'is-split': Boolean(previewBook) }">
         <BookGrid
           :books="displayedResults"
+          :columns="previewBook ? 1 : 0"
           :is-search="true"
           :shelf-book-urls="shelfBookUrls"
           :shelf-book-keys="shelfBookKeys"
           :loading="isSearching && rankedResults.length === 0"
           :animate="false"
           empty-text="未找到相关书籍"
-          @click="handleBookClick"
+          @click="openBookTocPreview"
           @info="handleBookInfo"
           @addToShelf="handleAddToShelf"
           @contextmenu="handleBookContextMenu"
         />
       </div>
+
+      <!-- 第三列：点击书籍卡片后显示目录 -->
+      <aside v-if="previewBook" class="search-toc-pane" aria-label="书籍目录预览">
+        <div class="sidebar-header">
+          <span class="toc-pane-title" :title="previewBook.name">{{ previewBook.name }}</span>
+          <div class="toc-pane-actions">
+            <button type="button" class="toc-mini-btn" @click="handleBookClick(previewBook)">详情</button>
+            <button type="button" class="toc-mini-btn" title="关闭目录" @click="closeBookTocPreview">✕</button>
+          </div>
+        </div>
+        <div v-if="previewTocLoading" class="pane-placeholder">正在加载目录...</div>
+        <div v-else-if="previewTocError" class="pane-placeholder">
+          <span>{{ previewTocError }}</span>
+          <button type="button" class="toc-mini-btn" @click="openBookTocPreview(previewBook)">重试</button>
+        </div>
+        <div v-else-if="!previewChapters.length" class="pane-placeholder">暂无目录</div>
+        <div v-else class="sidebar-source-list">
+          <button
+            v-for="chapter in previewChapters"
+            :key="`${chapter.index}-${chapter.url}`"
+            type="button"
+            class="sidebar-source-item"
+            :class="{ active: hoveredSearchChapter?.url === chapter.url && hoveredSearchChapter?.index === chapter.index }"
+            @mouseenter="scheduleSearchHoverPreview(chapter)"
+            @click="handleBookClick(previewBook)"
+          >
+            <span class="sidebar-source-name">{{ chapter.title }}</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- 第四列：鼠标悬停目录时实时加载并预览正文 -->
+      <section v-if="previewBook && hoveredSearchChapter" class="search-content-pane" aria-label="章节正文预览">
+        <div class="sidebar-header">
+          <span class="toc-pane-title" :title="hoveredSearchChapter.title">{{ hoveredSearchChapter.title }}</span>
+          <button type="button" class="toc-mini-btn primary" @click="handleBookClick(previewBook)">打开阅读</button>
+        </div>
+        <div v-if="hoveredSearchLoading" class="pane-placeholder">正在加载正文预览...</div>
+        <div v-else-if="hoveredSearchError" class="pane-placeholder">{{ hoveredSearchError }}</div>
+        <div v-else class="search-preview-body">
+          <p v-for="(line, idx) in hoveredSearchParagraphs" :key="idx">{{ line }}</p>
+        </div>
+      </section>
     </div>
 
     <BookDetailModal
@@ -136,7 +182,7 @@ import { useSourceStore } from '../stores/source'
 import { searchBookMultiSSE } from '../api/search'
 import { deleteBookSource, pinBookSource, saveBookSource } from '../api/source'
 import type { SseLike } from '../api/sse'
-import { saveBook } from '../api/bookshelf'
+import { getBookContent, getBookInfo, getChapterList, saveBook } from '../api/bookshelf'
 import { createCoverCacheSession } from '../utils/coverCacheSession'
 import { getSearchSessionCache, searchSessionKey } from '../utils/searchSessionCache'
 import { shouldResearchForSourceChange } from '../utils/searchSourceChange'
@@ -152,7 +198,7 @@ import {
 import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
 import { showContextMenu } from '../composables/useContextMenu'
-import type { Book, SearchBook } from '../types'
+import type { Book, BookChapter, SearchBook } from '../types'
 
 import { storeToRefs } from 'pinia'
 
@@ -407,6 +453,149 @@ function handleSourceContextMenu(item: ResultSourceSummary, event: MouseEvent) {
     },
   ])
 }
+
+const searchProgress = ref({ scanned: 0, totalSources: 0, failedCount: 0 })
+
+const searchProgressText = computed(() => {
+  const { scanned, totalSources, failedCount } = searchProgress.value
+  const foundCount = rankedResults.value.length
+  if (totalSources > 0) {
+    const failPart = failedCount > 0 ? `，失败/超时 ${failedCount}` : ''
+    return `搜索中… 已扫 ${Math.min(scanned, totalSources)} / ${totalSources} 个书源 · 找到 ${foundCount} 本${failPart}`
+  }
+  return foundCount > 0 ? `搜索中… 已找到 ${foundCount} 本` : '搜索中...'
+})
+
+const previewBook = ref<Book | SearchBook | null>(null)
+const previewChapters = ref<BookChapter[]>([])
+const previewTocLoading = ref(false)
+const previewTocError = ref('')
+let previewTocToken = 0
+
+const hoveredSearchChapter = ref<BookChapter | null>(null)
+const hoveredSearchContent = ref('')
+const hoveredSearchLoading = ref(false)
+const hoveredSearchError = ref('')
+const searchPreviewCache = new Map<string, string>()
+let searchHoverTimer: number | null = null
+let searchHoverToken = 0
+
+const hoveredSearchParagraphs = computed(() =>
+  hoveredSearchContent.value
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean),
+)
+
+function resetSearchHoverPreview() {
+  if (searchHoverTimer !== null) {
+    window.clearTimeout(searchHoverTimer)
+    searchHoverTimer = null
+  }
+  searchHoverToken += 1
+  hoveredSearchChapter.value = null
+  hoveredSearchContent.value = ''
+  hoveredSearchLoading.value = false
+  hoveredSearchError.value = ''
+}
+
+function closeBookTocPreview() {
+  previewBook.value = null
+  previewChapters.value = []
+  previewTocLoading.value = false
+  previewTocError.value = ''
+  previewTocToken += 1
+  resetSearchHoverPreview()
+}
+
+async function openBookTocPreview(book: Book | SearchBook) {
+  previewBook.value = book
+  previewChapters.value = []
+  previewTocError.value = ''
+  previewTocLoading.value = true
+  resetSearchHoverPreview()
+  const token = ++previewTocToken
+  try {
+    let tocUrl = book.bookUrl
+    try {
+      const info = await getBookInfo(book.bookUrl, book.origin)
+      if (token !== previewTocToken) return
+      if (info?.tocUrl) tocUrl = info.tocUrl
+    } catch {
+      // 详情解析失败时仍尝试直接用 bookUrl 获取目录
+    }
+    const chapters = await getChapterList({
+      bookUrl: book.bookUrl,
+      tocUrl,
+      bookSourceUrl: book.origin,
+    })
+    if (token !== previewTocToken) return
+    previewChapters.value = Array.isArray(chapters) ? chapters : []
+  } catch (e: unknown) {
+    if (token !== previewTocToken) return
+    previewTocError.value = (e as Error).message || '目录加载失败'
+  } finally {
+    if (token === previewTocToken) {
+      previewTocLoading.value = false
+    }
+  }
+}
+
+function scheduleSearchHoverPreview(chapter: BookChapter) {
+  const book = previewBook.value
+  if (!book) return
+  if (hoveredSearchChapter.value?.url === chapter.url && hoveredSearchChapter.value?.index === chapter.index) return
+  hoveredSearchChapter.value = chapter
+  hoveredSearchError.value = ''
+
+  const cacheKey = `${book.origin}::${chapter.url}`
+  const cached = searchPreviewCache.get(cacheKey)
+  if (cached !== undefined) {
+    hoveredSearchContent.value = cached
+    hoveredSearchLoading.value = false
+    return
+  }
+
+  if (searchHoverTimer !== null) window.clearTimeout(searchHoverTimer)
+  hoveredSearchLoading.value = true
+  hoveredSearchContent.value = ''
+  const token = ++searchHoverToken
+  searchHoverTimer = window.setTimeout(async () => {
+    searchHoverTimer = null
+    try {
+      const content = await getBookContent({
+        bookUrl: book.bookUrl,
+        chapterUrl: chapter.url,
+        bookSourceUrl: book.origin,
+        chapterTitle: chapter.title,
+        index: chapter.index,
+      })
+      if (token !== searchHoverToken) return
+      const text = typeof content === 'string' ? content : ''
+      searchPreviewCache.set(cacheKey, text)
+      hoveredSearchContent.value = text || '（本章暂无正文内容）'
+    } catch (e: unknown) {
+      if (token !== searchHoverToken) return
+      hoveredSearchError.value = (e as Error).message || '正文加载失败'
+    } finally {
+      if (token === searchHoverToken) {
+        hoveredSearchLoading.value = false
+      }
+    }
+  }, 240)
+}
+
+watch(searchKey, () => {
+  searchProgress.value = { scanned: 0, totalSources: 0, failedCount: 0 }
+  closeBookTocPreview()
+})
+
+onUnmounted(() => {
+  resetSearchHoverPreview()
+})
 
 /**
  * 拉下一批书源搜索结果。
@@ -675,7 +864,22 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
   stream.onmessage = (event) => {
     if (!isCurrentSearch()) return
     try {
-      const data = event.data as { data?: SearchBook[]; lastIndex?: number }
+      const data = event.data as {
+        data?: SearchBook[]
+        lastIndex?: number
+        scanned?: number
+        totalSources?: number
+        failedCount?: number
+      }
+      if (typeof data.scanned === 'number') {
+        searchProgress.value.scanned = Math.max(searchProgress.value.scanned, data.scanned)
+      }
+      if (typeof data.totalSources === 'number') {
+        searchProgress.value.totalSources = data.totalSources
+      }
+      if (typeof data.failedCount === 'number') {
+        searchProgress.value.failedCount = Math.max(searchProgress.value.failedCount, data.failedCount)
+      }
       if (data.data && Array.isArray(data.data)) {
         if (data.data.length > 0) pageHadResults = true
         const byKey = new Map(shelfStore.searchResults.map((r) => [searchMergeKey(r), r]))
@@ -706,6 +910,18 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
       lastIndex?: number
       hasMore?: boolean
       hasMorePages?: boolean
+      scanned?: number
+      totalSources?: number
+      failedCount?: number
+    }
+    if (typeof payload?.scanned === 'number') {
+      searchProgress.value.scanned = Math.max(searchProgress.value.scanned, payload.scanned)
+    }
+    if (typeof payload?.totalSources === 'number') {
+      searchProgress.value.totalSources = payload.totalSources
+    }
+    if (typeof payload?.failedCount === 'number') {
+      searchProgress.value.failedCount = Math.max(searchProgress.value.failedCount, payload.failedCount)
     }
     if (typeof payload?.lastIndex === 'number') {
       searchLastIndex = Math.max(searchLastIndex, payload.lastIndex)
@@ -1170,6 +1386,108 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 .search-books-pane {
   flex: 1;
   min-width: 0;
+}
+
+.search-books-pane.is-split {
+  flex: 0 0 320px;
+  width: 320px;
+}
+
+.search-toc-pane {
+  flex: 0 0 260px;
+  width: 260px;
+  position: sticky;
+  top: var(--space-3);
+  max-height: calc(100vh - 200px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.search-content-pane {
+  flex: 1;
+  min-width: 260px;
+  position: sticky;
+  top: var(--space-3);
+  max-height: calc(100vh - 200px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.toc-pane-title {
+  min-width: 0;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toc-pane-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.toc-mini-btn {
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.toc-mini-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.toc-mini-btn.primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+.pane-placeholder {
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-preview-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px 28px;
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--color-text);
+}
+
+.search-preview-body p {
+  margin: 0 0 0.9em;
+  text-indent: 2em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 1080px) {
+  .search-content-pane {
+    display: none;
+  }
 }
 
 @media (max-width: 720px) {

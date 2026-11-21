@@ -69,6 +69,7 @@ pub struct TestBookSourcesRequest {
     pub concurrent: Option<usize>,
     pub task_id: Option<String>,
     pub mode: Option<String>,
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1088,7 +1089,8 @@ pub async fn test_book_sources(
     // 上限 8: 每个源在检测过程中会有一次阻塞解析(js: 规则里还可能发起同步 HTTP),
     // 并发越高, 取消时需要收尾的在途任务越多、峰值线程也越高。12 → 8 后,
     // 取消响应更快且不会把两轮 HTTP 超时叠在一起。
-    let concurrent = req.concurrent.unwrap_or(8).clamp(1, 8);
+    let concurrent = req.concurrent.unwrap_or(4).clamp(1, 8);
+    let timeout_secs = req.timeout_secs.unwrap_or(30).clamp(5, 120);
     let keyword = req.keyword.clone();
     let mark_invalid = req.mark_invalid.unwrap_or(true);
     let (test_mode, target_invalid_group) = match req.mode.as_deref().map(str::trim) {
@@ -1112,6 +1114,7 @@ pub async fn test_book_sources(
         user_ns.to_string(),
         keyword,
         test_mode,
+        Duration::from_secs(timeout_secs),
         sources,
         concurrent,
         cancel_flag,
@@ -1279,6 +1282,7 @@ async fn test_sources_in_parallel(
     user_ns: String,
     keyword: Option<String>,
     mode: SourceTestMode,
+    per_source_timeout: Duration,
     sources: Vec<BookSource>,
     concurrent: usize,
     cancel_flag: Arc<AtomicBool>,
@@ -1295,8 +1299,6 @@ async fn test_sources_in_parallel(
     let mut pending = sources.into_iter();
     let mut tasks = JoinSet::new();
 
-    const SINGLE_SOURCE_TEST_TIMEOUT: Duration = Duration::from_secs(25);
-
     let spawn_next = |tasks: &mut JoinSet<_>, source: BookSource| {
         let book_service = book_service.clone();
         let user_ns = user_ns.clone();
@@ -1306,7 +1308,7 @@ async fn test_sources_in_parallel(
         let cancel = cancel_flag.clone();
         tasks.spawn(async move {
             let timed = tokio::time::timeout(
-                SINGLE_SOURCE_TEST_TIMEOUT,
+                per_source_timeout,
                 book_service.test_book_source_with_mode_cancellable(
                     &user_ns,
                     &source,
@@ -1333,7 +1335,10 @@ async fn test_sources_in_parallel(
                         explore_ok: false,
                         keyword: kw,
                         explore_url: None,
-                        search_error: Some("测试超时（超过 25 秒）".to_string()),
+                        search_error: Some(format!(
+                            "测试超时（超过 {} 秒）",
+                            per_source_timeout.as_secs()
+                        )),
                         explore_error: None,
                         cancelled: false,
                     }

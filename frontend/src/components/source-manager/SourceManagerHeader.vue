@@ -48,6 +48,51 @@
       >
         {{ testing && activeMode === 'toc' ? (stopping ? '正在中止…' : '中止测试') : '测试目录' }}
       </button>
+      <div class="threshold-wrap">
+        <button
+          class="action-btn"
+          :disabled="testing"
+          type="button"
+          title="调整书源测试超时、并发与关键词阈值"
+          @click="thresholdOpen = !thresholdOpen"
+        >
+          阈值 {{ testTimeoutSecs }}s/{{ testConcurrent }}
+        </button>
+        <div v-if="thresholdOpen" class="threshold-popover" @click.stop>
+          <div class="threshold-row">
+            <label>单源超时 (秒)</label>
+            <input
+              type="number"
+              min="5"
+              max="120"
+              :value="testTimeoutSecs"
+              @input="$emit('update:testTimeoutSecs', clampNumber(($event.target as HTMLInputElement).value, 5, 120, 30))"
+            />
+          </div>
+          <div class="threshold-row">
+            <label>并发数量 (1-8)</label>
+            <input
+              type="number"
+              min="1"
+              max="8"
+              :value="testConcurrent"
+              @input="$emit('update:testConcurrent', clampNumber(($event.target as HTMLInputElement).value, 1, 8, 4))"
+            />
+          </div>
+          <div class="threshold-row">
+            <label>搜索关键词</label>
+            <input
+              type="text"
+              placeholder="留空用默认/兜底词"
+              :value="testKeyword"
+              @input="$emit('update:testKeyword', ($event.target as HTMLInputElement).value)"
+            />
+          </div>
+          <div class="threshold-footer">
+            <button type="button" class="action-btn primary" @click="thresholdOpen = false">完成</button>
+          </div>
+        </div>
+      </div>
       <button
         class="action-btn danger"
         :disabled="testing || invalidCount === 0"
@@ -67,10 +112,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { BookSourceTestMode } from '../../api/source'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   total: number
   enabled: number
   filtered: number
@@ -81,9 +126,24 @@ const props = defineProps<{
   testCompleted: number
   testTotal: number
   invalidCount: number
+  testTimeoutSecs?: number
+  testConcurrent?: number
+  testKeyword?: string
   /** 已发出中止请求、还在等后端收尾(写回已完成的结果)。 */
   stopping?: boolean
-}>()
+}>(), {
+  testTimeoutSecs: 30,
+  testConcurrent: 4,
+  testKeyword: '',
+})
+
+const thresholdOpen = ref(false)
+
+function clampNumber(raw: string, min: number, max: number, fallback: number): number {
+  const num = Number(raw)
+  if (!Number.isFinite(num)) return fallback
+  return Math.max(min, Math.min(max, Math.round(num)))
+}
 
 const activeMode = computed<BookSourceTestMode>(() => props.testMode ?? 'all')
 const testModeLabel = computed(() => {
@@ -104,6 +164,9 @@ defineEmits<{
   'test-sources': [mode: BookSourceTestMode]
   'cancel-test': []
   'delete-invalid': []
+  'update:testTimeoutSecs': [value: number]
+  'update:testConcurrent': [value: number]
+  'update:testKeyword': [value: string]
   create: []
   close: []
 }>()
@@ -239,5 +302,52 @@ defineEmits<{
     top: calc(var(--space-4) + var(--safe-area-top));
     right: var(--space-4);
   }
+}
+
+.threshold-wrap {
+  position: relative;
+}
+
+.threshold-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 80;
+  width: 240px;
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-xl);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.threshold-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.threshold-row label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.threshold-row input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-sunken);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.threshold-footer {
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

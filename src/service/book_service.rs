@@ -1884,6 +1884,15 @@ impl BookService {
         mode: SourceTestMode,
         cancel: Option<&CancelSignal>,
     ) -> BookSourceAvailability {
+        let has_explicit_keyword = keyword
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+            || source
+                .rule_search
+                .as_ref()
+                .and_then(|r| r.check_key_word.as_deref())
+                .map(str::trim)
+                .is_some_and(|v| !v.is_empty());
         let keyword = keyword
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -1908,14 +1917,32 @@ impl BookService {
                 .search_book_cancellable(user_ns, source, &keyword, 1, cancel)
                 .await
             {
-                Ok(books) => {
+                Ok(books) if !books.is_empty() => {
                     sample_book_url = books
                         .iter()
                         .map(|b| b.book_url.trim())
                         .find(|u| !u.is_empty())
                         .map(str::to_string);
-                    (!books.is_empty(), None)
+                    (true, None)
                 }
+                Ok(_) if !has_explicit_keyword && !is_cancelled(cancel) => {
+                    // 默认关键词「我的」无结果时，自动用常用兜底词「都市」复测一次，减少好源误判。
+                    match self
+                        .search_book_cancellable(user_ns, source, "都市", 1, cancel)
+                        .await
+                    {
+                        Ok(retry_books) => {
+                            sample_book_url = retry_books
+                                .iter()
+                                .map(|b| b.book_url.trim())
+                                .find(|u| !u.is_empty())
+                                .map(str::to_string);
+                            (!retry_books.is_empty(), None)
+                        }
+                        Err(err) => (false, Some(format!("{err:?}"))),
+                    }
+                }
+                Ok(_) => (false, None),
                 Err(err) => (false, Some(format!("{err:?}"))),
             }
         } else {
