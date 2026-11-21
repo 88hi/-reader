@@ -24,9 +24,11 @@
         loading="lazy"
         @error="coverFailed = true"
       />
-      <div v-else class="cover-placeholder">
+      <div v-else class="cover-placeholder" :class="placeholderThemeClass">
+        <div class="cover-frame" aria-hidden="true"></div>
         <span class="cover-title">{{ book.name }}</span>
-        <span class="cover-author">{{ book.author }}</span>
+        <span class="cover-divider" aria-hidden="true"></span>
+        <span class="cover-author">{{ book.author || '佚名' }}</span>
       </div>
 
       <!-- Unread badge -->
@@ -147,6 +149,15 @@ const coverSrc = computed(() => {
   return getCoverUrl(url, asBook.value.origin)
 })
 
+const placeholderThemeClass = computed(() => {
+  const seed = (props.book.name || props.book.bookUrl || '').trim()
+  let hash = 0
+  for (let i = 0; i < seed.length; i++) {
+    hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0
+  }
+  return `cover-theme-${Math.abs(hash) % 6}`
+})
+
 const unreadCount = computed(() => {
   const b = props.book as Book
   if (!b.totalChapterNum || b.durChapterIndex === undefined) return 0
@@ -255,34 +266,132 @@ const sourceCount = computed(() => {
 }
 
 .cover-placeholder {
+  position: relative;
   width: 100%;
   height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: var(--space-2);
-  background:
-    linear-gradient(160deg, rgba(var(--color-primary-rgb), 0.12), rgba(52, 127, 146, 0.08)),
-    var(--color-bg-sunken);
+  padding: 14px 10px 12px 14px;
   text-align: center;
-  gap: var(--space-1);
+  gap: 6px;
+  overflow: hidden;
+  --cover-bg-top: #2c3e55;
+  --cover-bg-bottom: #182334;
+  --cover-accent: #e8c78b;
+  --cover-text: #f6efe2;
+  --cover-sub: rgba(246, 239, 226, 0.72);
+  background:
+    radial-gradient(120% 80% at 15% 10%, rgba(255, 255, 255, 0.14), transparent 55%),
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.022) 0px,
+      rgba(255, 255, 255, 0.022) 2px,
+      transparent 2px,
+      transparent 6px
+    ),
+    linear-gradient(155deg, var(--cover-bg-top), var(--cover-bg-bottom));
+}
+
+.cover-placeholder::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 9px;
+  background: linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0.36) 0%,
+    rgba(255, 255, 255, 0.12) 45%,
+    rgba(0, 0, 0, 0.22) 78%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+.cover-placeholder.cover-theme-0 {
+  --cover-bg-top: #2f435d;
+  --cover-bg-bottom: #192434;
+  --cover-accent: #e9c98e;
+}
+
+.cover-placeholder.cover-theme-1 {
+  --cover-bg-top: #284b46;
+  --cover-bg-bottom: #162b29;
+  --cover-accent: #dfca99;
+}
+
+.cover-placeholder.cover-theme-2 {
+  --cover-bg-top: #5b2e35;
+  --cover-bg-bottom: #2f171c;
+  --cover-accent: #f0cf99;
+}
+
+.cover-placeholder.cover-theme-3 {
+  --cover-bg-top: #544132;
+  --cover-bg-bottom: #2b2019;
+  --cover-accent: #e8c384;
+}
+
+.cover-placeholder.cover-theme-4 {
+  --cover-bg-top: #43375a;
+  --cover-bg-bottom: #221b31;
+  --cover-accent: #e7c998;
+}
+
+.cover-placeholder.cover-theme-5 {
+  --cover-bg-top: #374a54;
+  --cover-bg-bottom: #1d2930;
+  --cover-accent: #e4c690;
+}
+
+.cover-frame {
+  position: absolute;
+  inset: 6px 6px 6px 11px;
+  border: 1px solid color-mix(in srgb, var(--cover-accent) 34%, transparent);
+  border-radius: 3px;
+  pointer-events: none;
 }
 
 .cover-title {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  color: var(--color-primary);
+  position: relative;
+  z-index: 1;
+  font-family: "Noto Serif SC", "Songti SC", "STSong", Georgia, serif;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--cover-text);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.32);
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  line-height: var(--leading-tight);
+  line-height: 1.35;
+}
+
+.cover-divider {
+  position: relative;
+  z-index: 1;
+  width: 22px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--cover-accent) 82%, transparent),
+    transparent
+  );
+  flex-shrink: 0;
 }
 
 .cover-author {
+  position: relative;
+  z-index: 1;
+  max-width: 100%;
   font-size: 10px;
-  color: var(--color-text-tertiary);
+  color: var(--cover-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .unread-badge {

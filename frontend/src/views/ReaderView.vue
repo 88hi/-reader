@@ -243,6 +243,13 @@
                   v-html="page"
                 ></div>
               </section>
+              <div
+                v-if="isDualPageActive && dualPageFlipActive"
+                :key="`dual-flip-${dualPageFlipKey}`"
+                class="dual-page-flip-leaf"
+                :class="`is-${dualPageFlipDir}`"
+                aria-hidden="true"
+              ></div>
             </div>
           </section>
         </div>
@@ -1751,6 +1758,25 @@ function beginHorizontalPageTurnGuard() {
     horizontalPageTurnInProgress.value = false
   }, duration + 80)
 }
+
+/** 双页模式 3D 翻书动画状态。 */
+const dualPageFlipActive = ref(false)
+const dualPageFlipDir = ref<'next' | 'prev'>('next')
+const dualPageFlipKey = ref(0)
+let dualPageFlipTimer: number | null = null
+
+watch(horizontalPageIndex, (next, prev) => {
+  if (!isDualPageActive.value || horizontalJumpInProgress.value || next === prev) return
+  if (Number(config.value.animateDuration) <= 0) return
+  dualPageFlipDir.value = next > prev ? 'next' : 'prev'
+  dualPageFlipKey.value += 1
+  dualPageFlipActive.value = true
+  if (dualPageFlipTimer !== null) window.clearTimeout(dualPageFlipTimer)
+  dualPageFlipTimer = window.setTimeout(() => {
+    dualPageFlipTimer = null
+    dualPageFlipActive.value = false
+  }, 380)
+})
 
 /** 把某个搜索命中的高亮定位到视野内 —— 左右分页下就是"换到它所在的那一页"。
  *
@@ -4736,16 +4762,97 @@ watch(
   overflow: hidden;
 }
 
+.horizontal-pages.dual-page-mode {
+  perspective: 1800px;
+}
+
 .horizontal-pages.dual-page-mode::after {
   content: '';
   position: absolute;
   left: 50%;
   top: var(--reader-page-vertical-padding);
   bottom: var(--reader-page-vertical-padding);
-  width: 1px;
-  background: currentColor;
-  opacity: 0.1;
+  width: 24px;
+  margin-left: -12px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.05) 38%,
+    rgba(0, 0, 0, 0.14) 50%,
+    rgba(0, 0, 0, 0.05) 62%,
+    transparent 100%
+  );
   pointer-events: none;
+  z-index: 4;
+}
+
+.dual-page-flip-leaf {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  pointer-events: none;
+  z-index: 6;
+  will-change: transform, opacity;
+  border-radius: 2px;
+}
+
+.dual-page-flip-leaf.is-next {
+  left: 50%;
+  transform-origin: left center;
+  background: linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0.2) 0%,
+    rgba(255, 255, 255, 0.14) 14%,
+    rgba(128, 128, 128, 0.08) 58%,
+    rgba(0, 0, 0, 0.14) 100%
+  );
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.22);
+  animation: dualBookFlipNext 360ms cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.dual-page-flip-leaf.is-prev {
+  left: 0;
+  transform-origin: right center;
+  background: linear-gradient(
+    270deg,
+    rgba(0, 0, 0, 0.2) 0%,
+    rgba(255, 255, 255, 0.14) 14%,
+    rgba(128, 128, 128, 0.08) 58%,
+    rgba(0, 0, 0, 0.14) 100%
+  );
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.22);
+  animation: dualBookFlipPrev 360ms cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+@keyframes dualBookFlipNext {
+  0% {
+    transform: rotateY(0deg);
+    opacity: 0.9;
+  }
+  48% {
+    transform: rotateY(-92deg);
+    opacity: 1;
+  }
+  100% {
+    transform: rotateY(-180deg);
+    opacity: 0;
+  }
+}
+
+@keyframes dualBookFlipPrev {
+  0% {
+    transform: rotateY(0deg);
+    opacity: 0.9;
+  }
+  48% {
+    transform: rotateY(92deg);
+    opacity: 1;
+  }
+  100% {
+    transform: rotateY(180deg);
+    opacity: 0;
+  }
 }
 
 .horizontal-pages.page-selection-hidden .horizontal-page,

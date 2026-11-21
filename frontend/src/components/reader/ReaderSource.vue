@@ -91,10 +91,10 @@
 
       <div v-if="searching && !preparedResults.length" class="loading">
         <div class="spinner"></div>
-        {{ selectedSourceGroup ? '正在当前分组搜索同名书籍...' : '正在全网搜索同名书籍...' }}
+        <span>{{ searchStatusText }}</span>
       </div>
 
-      <div v-else-if="!preparedResults.length && !sourcesIncomplete" class="empty">未找到其他书源</div>
+      <div v-else-if="!preparedResults.length && !sourcesIncomplete" class="empty">{{ emptyResultText }}</div>
       
       <!--
         候选列表：紧凑的一行一源。
@@ -111,7 +111,7 @@
           type="button"
           class="candidate"
           :class="{ active: selectedCandidate?.book.bookUrl === item.book.bookUrl && selectedCandidate?.book.origin === item.book.origin }"
-          @click="selectCandidate(item)"
+          @click="selectCandidate(item, true)"
         >
           <span class="candidate-rail" aria-hidden="true"></span>
           <span class="candidate-body">
@@ -138,7 +138,7 @@
 
       <div v-if="searching && preparedResults.length" class="inline-loading">
         <div class="spinner small"></div>
-        继续搜索其他书源...
+        <span>{{ searchStatusText }}</span>
       </div>
 
       <!--
@@ -153,7 +153,9 @@
           <circle cx="12" cy="12" r="9" />
           <path d="M12 7.5v5.5M12 16.5h.01" />
         </svg>
-        <span class="incomplete-text">部分书源访问失败</span>
+        <span class="incomplete-text">
+          {{ searchProgress.failedCount > 0 ? `${searchProgress.failedCount} 个书源访问失败或超时` : '部分书源访问失败' }}
+        </span>
         <button type="button" class="incomplete-retry" @click="startSearch(true)">重试</button>
       </div>
       <div v-if="hasMoreSources && !searching" class="load-more-wrap">
@@ -196,6 +198,52 @@
       </div>
     </Transition>
 
+    <!-- 右侧目录预览面板：点击候选书源展开，点击章节直接换源阅读且左侧继续搜索 -->
+    <Teleport to="body">
+      <Transition name="toc-slide">
+        <aside
+          v-if="tocDrawerOpen && selectedCandidate"
+          class="candidate-toc-drawer"
+          :style="{ background: theme.popup, color: theme.fontColor, left: `${tocDrawerLeft}px` }"
+          @click.stop
+        >
+          <div class="toc-drawer-header">
+            <div class="toc-drawer-title-group">
+              <span class="toc-drawer-title">{{ sourceNameByOrigin(selectedCandidate.book.origin) }}</span>
+              <span v-if="candidateChapters.length" class="toc-drawer-count">共 {{ candidateChapters.length }} 章</span>
+            </div>
+            <button class="close-btn" type="button" title="关闭目录" aria-label="关闭目录" @click="tocDrawerOpen = false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
+
+          <div v-if="candidateTocLoading" class="loading">
+            <div class="spinner"></div>
+            <span>正在加载目录...</span>
+          </div>
+          <div v-else-if="candidateTocError" class="empty toc-error-box">
+            <span>{{ candidateTocError }}</span>
+            <button type="button" class="incomplete-retry" @click="loadCandidateToc(selectedCandidate)">重试</button>
+          </div>
+          <div v-else-if="!candidateChapters.length" class="empty">该书源暂无目录</div>
+          <div v-else class="toc-drawer-list">
+            <button
+              v-for="chapter in candidateChapters"
+              :key="`${chapter.index}-${chapter.url}`"
+              type="button"
+              class="toc-drawer-item"
+              :disabled="isSwitchingSource"
+              @click="handleSwitchToChapter(chapter)"
+            >
+              <span class="toc-item-title">{{ chapter.title }}</span>
+            </button>
+          </div>
+        </aside>
+      </Transition>
+    </Teleport>
+
     <!--
       换源不再盖全屏遮罩。
       换源实际要「抓详情页 → 抓目录 → 抓第一章正文」，慢源上能跑几十秒；旧版把
@@ -213,7 +261,7 @@ import { useAppStore } from '../../stores/app'
 import { useSourceStore } from '../../stores/source'
 import { getAvailableBookSourceSSE } from '../../api/search'
 import type { SseLike } from '../../api/sse'
-import { getBookInfo, getCoverUrl } from '../../api/bookshelf'
+import { getBookInfo, getChapterList, getCoverUrl } from '../../api/bookshelf'
 import { getBookSourceGroups } from '../../utils/sourceSelection'
 import { matchesSourceSwitchTitle, mergeSourceCandidates, normalizeSourceSwitchAuthor, sourceCandidateKey } from '../../utils/searchRank'
 import {
@@ -222,7 +270,7 @@ import {
   sourceCandidateBookKey,
   sourceCatalogSignatureOf,
 } from '../../utils/sourceCandidateCache'
-import type { Book, BookSource, SearchBook } from '../../types'
+import type { Book, BookChapter, BookSource, SearchBook } from '../../types'
 
 type CandidateItem = {
   book: SearchBook
@@ -280,8 +328,52 @@ const lastIndex = ref(-1)
 const hasMoreSources = ref(true)
 const selectedCandidate = ref<CandidateItem | null>(null)
 const candidatePreview = ref<Book | null>(null)
+const searchProgress = ref({ scanned: 0, totalSources: 0, failedCount: 0 })
+const tocDrawerOpen = ref(false)
+const tocDrawerLeft = ref(380)
+const candidateChapters = ref<BookChapter[]>([])
+const candidateTocLoading = ref(false)
+const candidateTocError = ref('')
+let tocLoadToken = 0
+
+const listRef = ref<HTMLElement | null>(null)
+
+function updateTocDrawerLeft() {
+  const el = listRef.value?.closest('.reader-source') as HTMLElement | null
+  if (el) {
+    const rect = el.getBoundingClientRect()
+    if (rect.right > 0) {
+      tocDrawerLeft.value = Math.round(rect.right)
+    }
+  }
+}
 const AVAILABLE_CONCURRENT_COUNT = 16
 let availableSourceSSE: SseLike | null = null
+
+const searchStatusText = computed(() => {
+  const { scanned, totalSources, failedCount } = searchProgress.value
+  const scopeLabel = selectedSourceGroup.value
+    ? (selectedSourceGroup.value === UNGROUPED_SOURCE_VALUE ? '未分组' : selectedSourceGroup.value)
+    : '全部书源'
+  if (totalSources > 0) {
+    const failPart = failedCount > 0 ? `，失败/超时 ${failedCount}` : ''
+    return `正在「${scopeLabel}」搜索：已扫 ${Math.min(scanned, totalSources)} / ${totalSources} 个书源${failPart}`
+  }
+  return selectedSourceGroup.value
+    ? `正在「${scopeLabel}」中搜索同名书籍...`
+    : '正在全网搜索同名书籍...'
+})
+
+const emptyResultText = computed(() => {
+  const { scanned, totalSources } = searchProgress.value
+  const scopeLabel = selectedSourceGroup.value
+    ? (selectedSourceGroup.value === UNGROUPED_SOURCE_VALUE ? '未分组' : `「${selectedSourceGroup.value}」分组`)
+    : '全部书源'
+  if (totalSources > 0 && scanned > 0) {
+    return `已扫描 ${scopeLabel} 共 ${totalSources} 个书源，未找到同名书籍`
+  }
+  return `在 ${scopeLabel} 中未找到其他书源`
+})
 
 /**
  * 与详情页共用同一个持久化缓存（issue #28 第 2 点）。
@@ -423,6 +515,10 @@ function startSearch(refresh = false) {
   searching.value = true
   sourcesIncomplete.value = false
   loadingMore.value = false
+  searchProgress.value = { scanned: 0, totalSources: 0, failedCount: 0 }
+  tocDrawerOpen.value = false
+  candidateChapters.value = []
+  candidateTocError.value = ''
   results.value = []
   lastIndex.value = -1
   hasMoreSources.value = true
@@ -489,6 +585,9 @@ type AvailableSourceSSEPayload = {
   lastIndex?: number
   hasMore?: boolean
   hasErrors?: boolean
+  scanned?: number
+  totalSources?: number
+  failedCount?: number
 }
 
 function closeAvailableSourceSSE() {
@@ -529,6 +628,15 @@ function parseAvailableSourcePayload(event: { data: unknown }): AvailableSourceS
 function applyAvailableSourcePayload(payload: AvailableSourceSSEPayload | null) {
   if (!payload) return
   sourcesIncomplete.value ||= payload.hasErrors === true
+  if (typeof payload.scanned === 'number') {
+    searchProgress.value.scanned = Math.max(searchProgress.value.scanned, payload.scanned)
+  }
+  if (typeof payload.totalSources === 'number') {
+    searchProgress.value.totalSources = payload.totalSources
+  }
+  if (typeof payload.failedCount === 'number') {
+    searchProgress.value.failedCount = Math.max(searchProgress.value.failedCount, payload.failedCount)
+  }
   const incoming = Array.isArray(payload.data)
     ? payload.data
     : (Array.isArray(payload.books) ? payload.books : [])
@@ -635,9 +743,47 @@ function finishAvailableSourceSSE(
   }
 }
 
-async function selectCandidate(item: CandidateItem) {
+async function loadCandidateToc(item: CandidateItem) {
+  const token = ++tocLoadToken
+  candidateTocLoading.value = true
+  candidateTocError.value = ''
+  candidateChapters.value = []
+  try {
+    let tocUrl = item.book.bookUrl
+    try {
+      const info = await getBookInfo(item.book.bookUrl, item.book.origin)
+      if (token !== tocLoadToken) return
+      candidatePreview.value = info
+      if (info?.tocUrl) tocUrl = info.tocUrl
+    } catch {
+      // 详情解析失败时仍尝试直接按 bookUrl 拉目录
+    }
+    const chapters = await getChapterList({
+      bookUrl: item.book.bookUrl,
+      tocUrl,
+      bookSourceUrl: item.book.origin,
+    })
+    if (token !== tocLoadToken) return
+    candidateChapters.value = Array.isArray(chapters) ? chapters : []
+  } catch (e: unknown) {
+    if (token !== tocLoadToken) return
+    candidateTocError.value = (e as Error).message || '目录加载失败'
+  } finally {
+    if (token === tocLoadToken) {
+      candidateTocLoading.value = false
+    }
+  }
+}
+
+async function selectCandidate(item: CandidateItem, openToc = false) {
   selectedCandidate.value = item
   candidatePreview.value = null
+  if (openToc) {
+    updateTocDrawerLeft()
+    tocDrawerOpen.value = true
+    await loadCandidateToc(item)
+    return
+  }
   try {
     candidatePreview.value = await getBookInfo(item.book.bookUrl, item.book.origin)
   } catch {
@@ -645,10 +791,26 @@ async function selectCandidate(item: CandidateItem) {
   }
 }
 
+async function handleSwitchToChapter(chapter: BookChapter) {
+  const candidate = selectedCandidate.value?.book
+  if (!candidate || isSwitchingSource.value) return
+  // 换源查看该章节内容，同时保持左侧换源面板打开并继续搜索其它书源。
+  tocDrawerOpen.value = false
+  try {
+    await store.switchSource(candidate.bookUrl, candidate.origin, {
+      keepPanelOpen: true,
+      targetChapterIndex: chapter.index,
+    })
+  } catch {
+    // switchSource 内部已弹 toast，这里不再重复提示。
+  }
+}
+
 /** 收起底部详情，回到纯列表。选中态一并清掉，避免列表里留着高亮却看不到对应详情。 */
 function clearSelection() {
   selectedCandidate.value = null
   candidatePreview.value = null
+  tocDrawerOpen.value = false
 }
 
 /**
@@ -1315,6 +1477,153 @@ async function handleSwitch(res: SearchBook) {
 
   .switch-btn {
     padding: 7px 14px;
+  }
+}
+</style>
+
+<style>
+.candidate-toc-drawer {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  width: min(340px, calc(100vw - 380px));
+  min-width: 240px;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid rgba(128, 128, 128, 0.18);
+  box-shadow: 12px 0 32px rgba(0, 0, 0, 0.28);
+}
+
+.candidate-toc-drawer .toc-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.14);
+  flex-shrink: 0;
+}
+
+.candidate-toc-drawer .toc-drawer-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.candidate-toc-drawer .toc-drawer-title {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.candidate-toc-drawer .toc-drawer-count {
+  font-size: 11px;
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+
+.candidate-toc-drawer .close-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.candidate-toc-drawer .close-btn:hover {
+  opacity: 1;
+  background: rgba(128, 128, 128, 0.14);
+}
+
+.candidate-toc-drawer .close-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.candidate-toc-drawer .toc-drawer-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px 16px;
+}
+
+.candidate-toc-drawer .toc-drawer-item {
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  cursor: pointer;
+  display: block;
+  transition: background 0.14s ease;
+}
+
+.candidate-toc-drawer .toc-drawer-item:hover:not(:disabled) {
+  background: rgba(128, 128, 128, 0.14);
+}
+
+.candidate-toc-drawer .toc-drawer-item:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.candidate-toc-drawer .toc-item-title {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.candidate-toc-drawer .loading,
+.candidate-toc-drawer .empty {
+  padding: 36px 20px;
+  text-align: center;
+  font-size: 13px;
+  opacity: 0.7;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.candidate-toc-drawer .toc-error-box .incomplete-retry {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.toc-slide-enter-active,
+.toc-slide-leave-active {
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.toc-slide-enter-from,
+.toc-slide-leave-to {
+  transform: translateX(-12px);
+  opacity: 0;
+}
+
+@media (max-width: 720px) {
+  .candidate-toc-drawer {
+    left: 0 !important;
+    width: 100vw;
   }
 }
 </style>

@@ -4298,7 +4298,11 @@ export const useReaderStore = defineStore('reader', () => {
    * 就立刻收起面板并释放标记，后面的目录/正文交给阅读页自己的加载态（`loading`
    * 仍由 loadBook / loadChapter 管，那是"正文正在加载"，语义本来就不同）。
    */
-  async function switchSource(newUrl: string, sourceUrl: string) {
+  async function switchSource(
+    newUrl: string,
+    sourceUrl: string,
+    options?: { keepPanelOpen?: boolean; targetChapterIndex?: number },
+  ) {
     const previousBook = book.value
     if (!previousBook) return null
     // 换源会改写书架记录，并发两次会互相覆盖，正在切换时直接忽略新的请求。
@@ -4344,17 +4348,18 @@ export const useReaderStore = defineStore('reader', () => {
       // 等于剥夺用户改选别的源的机会 —— 而「换源随时可用」正是这个面板的意义。
       switched = true
       switchingSource.value = null
-      if (activePanel.value === 'source') closePanel()
+      if (activePanel.value === 'source' && !options?.keepPanelOpen) closePanel()
       const sourceName = updatedBook.originName || updatedBook.origin || sourceUrl
       appStore.showToast(`已切换到 ${sourceName}，正在加载目录…`, 'success')
       // 目录 + 正文一次性在 loadBook 里做完：它本来就要取目录并加载初始章，把
       // 「按标题定位 + 复用旧进度」作为参数传下去，慢源上就不会把最贵的正文抓取
       // 做两遍（旧实现先按章号抓一次，再按标题抓一次）。
+      const hasExplicitTarget = typeof options?.targetChapterIndex === 'number'
       await loadBook(updatedBook, false, {
         keepSourceSwitch: true,
-        initialChapterTitle: previousChapterTitle,
-        initialChapterIndex: previousIndex,
-        initialProgressOverride: previousProgress,
+        initialChapterTitle: hasExplicitTarget ? undefined : previousChapterTitle,
+        initialChapterIndex: hasExplicitTarget ? options.targetChapterIndex : previousIndex,
+        initialProgressOverride: hasExplicitTarget ? 0 : previousProgress,
       })
       if (generation !== sourceSwitchGeneration) return null
       // 落位进度由 loadChapter 内部经 setActiveChapterState 写入（它在正文真的

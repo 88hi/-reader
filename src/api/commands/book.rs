@@ -2321,9 +2321,15 @@ pub async fn search_book_multi_sse(
                 let cur_idx = idx;
                 let user_ns_value = user_ns;
                 tasks.push(tokio::spawn(async move {
-                    let res = svc
-                        .search_book(&user_ns_value, &source, &k, search_page)
-                        .await;
+                    let res = match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        svc.search_book(&user_ns_value, &source, &k, search_page),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => Err(AppError::Internal(anyhow::anyhow!("搜索超时"))),
+                    };
                     (cur_idx, source.book_source_name, res)
                 }));
                 idx += 1;
@@ -2790,6 +2796,10 @@ pub async fn get_available_book_source_sse(
 
         let mut next_index = (last_index_start + 1).max(0) as usize;
         let mut last_idx = last_index_start;
+        let total_sources = sources.len();
+        let mut scanned_sources = next_index;
+        let mut failed_sources = 0usize;
+        let mut last_progress_emit = std::time::Instant::now();
         let scan_limit = effective_available_result_limit(req.result_limit)
             .min(AVAILABLE_SOURCE_SSE_SCAN_SOFT_LIMIT);
         let mut all_results: Vec<SearchBook> = Vec::new();
@@ -2815,9 +2825,15 @@ pub async fn get_available_book_source_sse(
                 let target_author = book.author.clone();
                 let user_ns_value = user_ns;
                 tasks.spawn(async move {
-                    let res = svc
-                        .search_book(&user_ns_value, &source, &target_name, 1)
-                        .await;
+                    let res = match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        svc.search_book(&user_ns_value, &source, &target_name, 1),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => Err(AppError::Internal(anyhow::anyhow!("搜索超时"))),
+                    };
                     (source_index as i32, res, target_name, target_author)
                 });
                 next_index += 1;
@@ -2833,6 +2849,8 @@ pub async fn get_available_book_source_sse(
             match next {
                 Some(Ok((source_index, search_result, target_name, target_author))) => {
                     last_idx = last_idx.max(source_index);
+                    scanned_sources += 1;
+                    let mut emitted = false;
                     match search_result {
                         Ok(list) => {
                             let matches = take_available_source_sse_matches(
@@ -2846,10 +2864,14 @@ pub async fn get_available_book_source_sse(
                             // source-index cursor cannot resume halfway through its list.
                             for candidate in matches {
                                 all_results.push(candidate.clone());
+                                emitted = true;
                                 let payload = serde_json::json!({
                                     "event": "data",
                                     "lastIndex": source_index,
                                     "hasMore": next_index < sources.len() || !tasks.is_empty(),
+                                    "scanned": scanned_sources,
+                                    "totalSources": total_sources,
+                                    "failedCount": failed_sources,
                                     "data": [candidate]
                                 });
                                 if on_event.send(payload).is_err() {
@@ -2860,6 +2882,7 @@ pub async fn get_available_book_source_sse(
                         }
                         Err(err) => {
                             search_failed = true;
+                            failed_sources += 1;
                             tracing::debug!(
                                 "getAvailableBookSourceSSE search failed at source index {}: {:?}",
                                 source_index,
@@ -2867,9 +2890,29 @@ pub async fn get_available_book_source_sse(
                             );
                         }
                     }
+                    if !emitted
+                        && last_progress_emit.elapsed() >= std::time::Duration::from_millis(180)
+                    {
+                        last_progress_emit = std::time::Instant::now();
+                        let payload = serde_json::json!({
+                            "event": "data",
+                            "lastIndex": last_idx,
+                            "hasMore": next_index < sources.len() || !tasks.is_empty(),
+                            "scanned": scanned_sources,
+                            "totalSources": total_sources,
+                            "failedCount": failed_sources,
+                            "data": []
+                        });
+                        if on_event.send(payload).is_err() {
+                            tasks.abort_all();
+                            return;
+                        }
+                    }
                 }
                 Some(Err(err)) => {
                     search_failed = true;
+                    scanned_sources += 1;
+                    failed_sources += 1;
                     tracing::debug!("getAvailableBookSourceSSE task join failed: {:?}", err);
                 }
                 None => break,
@@ -2887,7 +2930,7 @@ pub async fn get_available_book_source_sse(
         // 完整扫描后保存全部候选。仅排除当前书籍地址，聚合源内的其他地址保留。
         // 被取消时同样不写: 这份结果是半截的, 写进去会把「还没扫到的源」当成
         // 「搜不到这本书」固化下来 (与 `has_more` 同理)。
-        if last_index_start < 0 && !has_more && !cancelled && !search_failed {
+        if !has_group_filter && last_index_start < 0 && !has_more && !cancelled && !search_failed {
             let cache_list: Vec<SearchBook> = all_results
                 .iter()
                 .filter(|candidate| !is_current_source_candidate(candidate, &book))
@@ -2918,7 +2961,10 @@ pub async fn get_available_book_source_sse(
             "event": "end",
             "lastIndex": final_last_idx,
             "hasMore": has_more,
-            "hasErrors": search_failed
+            "hasErrors": search_failed,
+            "scanned": scanned_sources,
+            "totalSources": total_sources,
+            "failedCount": failed_sources
         }));
     });
 

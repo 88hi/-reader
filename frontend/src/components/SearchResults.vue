@@ -72,19 +72,54 @@
       </div>
     </div>
 
-    <BookGrid
-      :books="rankedResults"
-      :is-search="true"
-      :shelf-book-urls="shelfBookUrls"
-      :shelf-book-keys="shelfBookKeys"
-      :loading="isSearching && rankedResults.length === 0"
-      :animate="false"
-      empty-text="未找到相关书籍"
-      @click="handleBookClick"
-      @info="handleBookInfo"
-      @addToShelf="handleAddToShelf"
-      @contextmenu="handleBookContextMenu"
-    />
+    <div class="search-body-layout">
+      <aside v-if="resultSourceSummaries.length > 0" class="search-sources-sidebar" aria-label="命中书源列表">
+        <div class="sidebar-header">
+          <span>命中书源</span>
+          <span class="sidebar-hint">右键可管理</span>
+        </div>
+        <div class="sidebar-source-list">
+          <button
+            type="button"
+            class="sidebar-source-item"
+            :class="{ active: activeResultSourceUrl === '' }"
+            @click="activeResultSourceUrl = ''"
+          >
+            <span class="sidebar-source-name">全部书源</span>
+            <span class="sidebar-source-count">{{ rankedResults.length }}</span>
+          </button>
+          <button
+            v-for="item in resultSourceSummaries"
+            :key="item.origin"
+            type="button"
+            class="sidebar-source-item"
+            :class="{ active: activeResultSourceUrl === item.origin }"
+            :title="`${item.name}（右键管理书源）`"
+            @click="activeResultSourceUrl = item.origin"
+            @contextmenu.prevent="handleSourceContextMenu(item, $event)"
+          >
+            <span class="sidebar-source-name">{{ item.name }}</span>
+            <span class="sidebar-source-count">{{ item.count }}</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="search-books-pane">
+        <BookGrid
+          :books="displayedResults"
+          :is-search="true"
+          :shelf-book-urls="shelfBookUrls"
+          :shelf-book-keys="shelfBookKeys"
+          :loading="isSearching && rankedResults.length === 0"
+          :animate="false"
+          empty-text="未找到相关书籍"
+          @click="handleBookClick"
+          @info="handleBookInfo"
+          @addToShelf="handleAddToShelf"
+          @contextmenu="handleBookContextMenu"
+        />
+      </div>
+    </div>
 
     <BookDetailModal
       v-model="showBookDetail"
@@ -99,6 +134,7 @@ import { useBookshelfStore } from '../stores/bookshelf'
 import { useAppStore } from '../stores/app'
 import { useSourceStore } from '../stores/source'
 import { searchBookMultiSSE } from '../api/search'
+import { deleteBookSource, pinBookSource, saveBookSource } from '../api/source'
 import type { SseLike } from '../api/sse'
 import { saveBook } from '../api/bookshelf'
 import { createCoverCacheSession } from '../utils/coverCacheSession'
@@ -240,6 +276,137 @@ const rankedResults = computed<SearchBook[]>(() => {
     })
   return rankSearchResults(enriched, searchKey.value)
 })
+
+type ResultSourceSummary = {
+  origin: string
+  name: string
+  count: number
+}
+
+const activeResultSourceUrl = ref('')
+
+const resultSourceSummaries = computed<ResultSourceSummary[]>(() => {
+  const counts = new Map<string, number>()
+  for (const book of rankedResults.value) {
+    const origins = new Set<string>()
+    if (book.sourceCandidates?.length) {
+      for (const c of book.sourceCandidates) {
+        if (c.origin) origins.add(c.origin)
+      }
+    } else if (book.bookSourceUrls?.length) {
+      for (const u of book.bookSourceUrls) {
+        if (u) origins.add(u)
+      }
+    }
+    if (book.origin) origins.add(book.origin)
+    for (const origin of origins) {
+      counts.set(origin, (counts.get(origin) || 0) + 1)
+    }
+  }
+  return Array.from(counts.entries())
+    .map(([origin, count]) => ({
+      origin,
+      name: sourceByUrl.value.get(origin)?.bookSourceName || origin,
+      count,
+    }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hans-CN'))
+})
+
+watch(resultSourceSummaries, (list) => {
+  if (activeResultSourceUrl.value && !list.some((item) => item.origin === activeResultSourceUrl.value)) {
+    activeResultSourceUrl.value = ''
+  }
+})
+
+watch(searchKey, () => {
+  activeResultSourceUrl.value = ''
+})
+
+const displayedResults = computed<SearchBook[]>(() => {
+  const targetOrigin = activeResultSourceUrl.value
+  if (!targetOrigin) return rankedResults.value
+  const matched: SearchBook[] = []
+  for (const book of rankedResults.value) {
+    if (book.origin === targetOrigin) {
+      matched.push(book)
+      continue
+    }
+    const candidate = book.sourceCandidates?.find((c) => c.origin === targetOrigin)
+    if (candidate) {
+      const source = sourceByUrl.value.get(targetOrigin)
+      matched.push({
+        ...book,
+        ...candidate,
+        originName: candidate.originName || source?.bookSourceName || targetOrigin,
+        originGroup: candidate.originGroup || source?.bookSourceGroup,
+        bookSourceUrls: book.bookSourceUrls,
+        sourceCandidates: book.sourceCandidates,
+      })
+      continue
+    }
+    if (book.bookSourceUrls?.includes(targetOrigin)) {
+      matched.push(book)
+    }
+  }
+  return matched
+})
+
+function handleSourceContextMenu(item: ResultSourceSummary, event: MouseEvent) {
+  const source = sourceByUrl.value.get(item.origin)
+  showContextMenu(event, [
+    {
+      label: '置顶书源',
+      action: async () => {
+        try {
+          await pinBookSource(item.origin)
+          await sourceStore.fetchSources()
+          appStore.showToast(`已置顶「${item.name}」`, 'success')
+        } catch (e: unknown) {
+          appStore.showToast((e as Error).message || '置顶书源失败', 'error')
+        }
+      },
+    },
+    {
+      label: '禁用此书源',
+      disabled: !source,
+      action: async () => {
+        if (!source) return
+        try {
+          await saveBookSource({ ...source, enabled: false })
+          await sourceStore.fetchSources()
+          appStore.showToast(`已禁用「${item.name}」`, 'success')
+        } catch (e: unknown) {
+          appStore.showToast((e as Error).message || '禁用书源失败', 'error')
+        }
+      },
+    },
+    {
+      label: '打开书源管理',
+      action: () => {
+        appStore.showSourceManager = true
+      },
+    },
+    {
+      label: '删除此书源',
+      danger: true,
+      divider: true,
+      action: async () => {
+        const ok = await appStore.confirmDialog(`确定删除书源「${item.name}」？此操作不可撤销。`, {
+          title: '删除书源',
+          danger: true,
+        })
+        if (!ok) return
+        try {
+          await deleteBookSource(item.origin)
+          await sourceStore.fetchSources()
+          appStore.showToast(`已删除「${item.name}」`, 'success')
+        } catch (e: unknown) {
+          appStore.showToast((e as Error).message || '删除书源失败', 'error')
+        }
+      },
+    },
+  ])
+}
 
 /**
  * 拉下一批书源搜索结果。
@@ -902,7 +1069,131 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   font-size: var(--text-sm);
 }
 
+.search-body-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  min-height: 0;
+}
+
+.search-sources-sidebar {
+  width: 210px;
+  flex-shrink: 0;
+  position: sticky;
+  top: var(--space-3);
+  max-height: calc(100vh - 200px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.sidebar-hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--color-text-tertiary);
+}
+
+.sidebar-source-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-source-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast), color var(--duration-fast);
+}
+
+.sidebar-source-item:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.sidebar-source-item.active {
+  background: var(--color-primary-soft-bg);
+  color: var(--color-primary-soft-text);
+  font-weight: 600;
+}
+
+.sidebar-source-name {
+  min-width: 0;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-source-count {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--color-border) 55%, transparent);
+  color: var(--color-text-secondary);
+}
+
+.sidebar-source-item.active .sidebar-source-count {
+  background: color-mix(in srgb, var(--color-primary) 22%, transparent);
+  color: var(--color-primary-soft-text);
+}
+
+.search-books-pane {
+  flex: 1;
+  min-width: 0;
+}
+
 @media (max-width: 720px) {
+  .search-body-layout {
+    flex-direction: column;
+  }
+
+  .search-sources-sidebar {
+    width: 100%;
+    position: static;
+    max-height: none;
+  }
+
+  .sidebar-source-list {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .sidebar-source-item {
+    width: auto;
+    flex-shrink: 0;
+  }
+
   .search-results {
     padding: 0 var(--space-4);
   }
