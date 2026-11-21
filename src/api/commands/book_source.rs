@@ -1295,6 +1295,8 @@ async fn test_sources_in_parallel(
     let mut pending = sources.into_iter();
     let mut tasks = JoinSet::new();
 
+    const SINGLE_SOURCE_TEST_TIMEOUT: Duration = Duration::from_secs(25);
+
     let spawn_next = |tasks: &mut JoinSet<_>, source: BookSource| {
         let book_service = book_service.clone();
         let user_ns = user_ns.clone();
@@ -1303,15 +1305,40 @@ async fn test_sources_in_parallel(
         // select! 包裹, 取消时 future 被 drop → 连接真断, 而不是等 30s 超时。
         let cancel = cancel_flag.clone();
         tasks.spawn(async move {
-            let availability = book_service
-                .test_book_source_with_mode_cancellable(
+            let timed = tokio::time::timeout(
+                SINGLE_SOURCE_TEST_TIMEOUT,
+                book_service.test_book_source_with_mode_cancellable(
                     &user_ns,
                     &source,
                     keyword.as_deref(),
                     mode,
                     Some(&cancel),
-                )
-                .await;
+                ),
+            )
+            .await;
+            let availability = match timed {
+                Ok(avail) => avail,
+                Err(_) => {
+                    let kw = keyword
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| source.check_keyword());
+                    crate::service::book_service::BookSourceAvailability {
+                        book_source_url: source.book_source_url.clone(),
+                        book_source_name: source.book_source_name.clone(),
+                        valid: false,
+                        search_ok: false,
+                        explore_ok: false,
+                        keyword: kw,
+                        explore_url: None,
+                        search_error: Some("测试超时（超过 25 秒）".to_string()),
+                        explore_error: None,
+                        cancelled: false,
+                    }
+                }
+            };
             (source, availability)
         });
     };
@@ -1356,14 +1383,16 @@ async fn test_sources_in_parallel(
                                     false,
                                 );
                             }
-                            if let Some(source) = pending.next() {
-                                spawn_next(&mut tasks, source);
-                            }
                         }
                         Err(err) if !err.is_cancelled() => {
                             tracing::error!("book source test task failed: {err}")
                         }
                         Err(_) => {}
+                    }
+                    if !cancel_flag.load(Ordering::Relaxed) {
+                        if let Some(source) = pending.next() {
+                            spawn_next(&mut tasks, source);
+                        }
                     }
                 }
             }

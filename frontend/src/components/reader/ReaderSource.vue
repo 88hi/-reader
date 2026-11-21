@@ -33,7 +33,6 @@
           type="button"
           title="重新搜索书源"
           aria-label="重新搜索书源"
-          :disabled="isLocal"
           @click="startSearch(true)"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -74,14 +73,25 @@
         </div>
       </div>
 
-      <div v-if="isLocal" class="empty">本地书籍不支持换源</div>
-
-      <template v-else>
-      <div class="section-label">其他可用源</div>
+      <div class="section-header-row">
+        <div class="section-label">其他可用源</div>
+        <select
+          v-model="selectedSourceGroup"
+          class="source-group-select"
+          aria-label="选择换源书源分组"
+          @change="handleSourceGroupChange"
+        >
+          <option value="">全部书源 ({{ enabledSourcesCount }})</option>
+          <option v-for="group in availableSourceGroups" :key="group" :value="group">
+            {{ group }}
+          </option>
+          <option v-if="hasUngroupedSources" value="__ungrouped__">未分组</option>
+        </select>
+      </div>
 
       <div v-if="searching && !preparedResults.length" class="loading">
         <div class="spinner"></div>
-        正在全网搜索同名书籍...
+        {{ selectedSourceGroup ? '正在当前分组搜索同名书籍...' : '正在全网搜索同名书籍...' }}
       </div>
 
       <div v-else-if="!preparedResults.length && !sourcesIncomplete" class="empty">未找到其他书源</div>
@@ -130,7 +140,6 @@
         <div class="spinner small"></div>
         继续搜索其他书源...
       </div>
-      </template>
 
       <!--
         部分书源失败：一条提示 + 一个明确动作。
@@ -164,7 +173,7 @@
       只留「书源名（+作者/更新时间）」和「最新章节 · 衔接状态」+ 按钮。
     -->
     <Transition name="detail-slide">
-      <div v-if="selectedCandidate && !isLocal" class="candidate-detail">
+      <div v-if="selectedCandidate" class="candidate-detail">
         <div class="detail-row detail-row-main">
           <span class="detail-name">{{ sourceNameByOrigin(selectedCandidate.book.origin) }}</span>
           <span class="detail-sub">{{ detailSubLine }}</span>
@@ -205,7 +214,7 @@ import { useSourceStore } from '../../stores/source'
 import { getAvailableBookSourceSSE } from '../../api/search'
 import type { SseLike } from '../../api/sse'
 import { getBookInfo, getCoverUrl } from '../../api/bookshelf'
-import { isLocalBook } from '../../utils/localBook'
+import { getBookSourceGroups } from '../../utils/sourceSelection'
 import { matchesSourceSwitchTitle, mergeSourceCandidates, normalizeSourceSwitchAuthor, sourceCandidateKey } from '../../utils/searchRank'
 import {
   getSourceCandidateCache,
@@ -213,7 +222,7 @@ import {
   sourceCandidateBookKey,
   sourceCatalogSignatureOf,
 } from '../../utils/sourceCandidateCache'
-import type { Book, SearchBook } from '../../types'
+import type { Book, BookSource, SearchBook } from '../../types'
 
 type CandidateItem = {
   book: SearchBook
@@ -224,11 +233,45 @@ type CandidateItem = {
   score: number
 }
 
+const SWITCH_SOURCE_GROUP_KEY = 'reader-switch-source-group'
+const UNGROUPED_SOURCE_VALUE = '__ungrouped__'
+
+function readStoredSwitchGroup(): string {
+  try {
+    return localStorage.getItem(SWITCH_SOURCE_GROUP_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function writeStoredSwitchGroup(group: string) {
+  try {
+    if (group) {
+      localStorage.setItem(SWITCH_SOURCE_GROUP_KEY, group)
+    } else {
+      localStorage.removeItem(SWITCH_SOURCE_GROUP_KEY)
+    }
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
+
+function sourceMatchesSelectedGroup(source: BookSource, group: string): boolean {
+  if (!group) return true
+  const raw = (source.bookSourceGroup || '').trim()
+  if (group === UNGROUPED_SOURCE_VALUE) return !raw
+  if (!raw) return false
+  return raw
+    .split(/[,;；、]/)
+    .map((item) => item.trim())
+    .includes(group)
+}
+
 const store = useReaderStore()
 const appStore = useAppStore()
 const sourceStore = useSourceStore()
 const theme = computed(() => store.chromeTheme)
-const isLocal = computed(() => isLocalBook(store.book))
+const selectedSourceGroup = ref<string>(readStoredSwitchGroup())
 const searching = ref(false)
 const sourcesIncomplete = ref(false)
 const loadingMore = ref(false)
@@ -269,15 +312,28 @@ function sourceKey(origin: string): string {
   return normalized.replace(/\/+$/, '')
 }
 
-/** 已启用书源的 origin 集合; 书源列表还没拿到时返回 null(此时不做过滤)。 */
+const enabledSources = computed(() => sourceStore.sources.filter((source) => source.enabled !== false))
+const enabledSourcesCount = computed(() => enabledSources.value.length)
+const availableSourceGroups = computed(() => getBookSourceGroups(enabledSources.value))
+const hasUngroupedSources = computed(() =>
+  enabledSources.value.some((source) => !(source.bookSourceGroup || '').trim()),
+)
+
+/** 已启用（且命中当前所选分组）书源的 origin 集合; 书源列表还没拿到时返回 null(此时不做过滤)。 */
 const enabledSourceOrigins = computed<Set<string> | null>(() => {
   if (!sourceStore.sources.length) return null
+  const group = selectedSourceGroup.value
   return new Set(
-    sourceStore.sources
-      .filter((source) => source.enabled !== false)
+    enabledSources.value
+      .filter((source) => sourceMatchesSelectedGroup(source, group))
       .map((source) => sourceKey(source.bookSourceUrl)),
   )
 })
+
+function handleSourceGroupChange() {
+  writeStoredSwitchGroup(selectedSourceGroup.value)
+  startSearch(true)
+}
 
 function normalizeText(value?: string) {
   return (value || '')
@@ -318,8 +374,16 @@ onMounted(async () => {
   // 每次打开都刷新一遍书源清单：候选会被 `enabledSourceOrigins` 过滤，
   // 沿用过期清单会把刚启用的源误剔除。
   await sourceStore.fetchSources().catch(() => undefined)
-  // `watch(enabledSourceOrigins)` 会在清单到位后重新过滤并补选首项，
-  // 这里不用再做一遍。
+  // 若已保存的分组在新书源清单中已不存在，自动回退到「全部书源」并重搜。
+  if (
+    selectedSourceGroup.value
+    && selectedSourceGroup.value !== UNGROUPED_SOURCE_VALUE
+    && !availableSourceGroups.value.includes(selectedSourceGroup.value)
+  ) {
+    selectedSourceGroup.value = ''
+    writeStoredSwitchGroup('')
+    startSearch(true)
+  }
 })
 
 // 首次进入应用直接打开阅读页时, 书源列表往往晚于本面板就绪: 那一次合并因为
@@ -349,7 +413,7 @@ onUnmounted(() => {
  *  `refresh = true`（点刷新 / 重试）：强制并发搜索，并保留旧结果垫底。
  */
 function startSearch(refresh = false) {
-  if (!store.book || isLocal.value) return
+  if (!store.book) return
   closeAvailableSourceSSE()
   // 与详情页同一口径：打开就搜，旧缓存只作为垫底先显示出来。
   // 之前靠「签名是否变化」判断要不要搜，但签名只描述当时那份书源清单，
@@ -392,9 +456,11 @@ function sourceCatalogSignature(): string {
 function commitResults(complete: boolean, previous: SearchBook[]) {
   const key = sourceCandidateCacheKey()
   if (!key) return
-  const merged = mergeForCommit(previous, results.value, complete, mergeSourceCandidates)
+  // 按分组筛选搜索时不要用局部结果覆盖全局「全部书源」的完整缓存，只合并增量。
+  const effectiveComplete = selectedSourceGroup.value ? false : complete
+  const merged = mergeForCommit(previous, results.value, effectiveComplete, mergeSourceCandidates)
   if (merged.length <= 1) return
-  sourceCandidateCache.set(key, sourceCatalogSignature(), merged, complete)
+  sourceCandidateCache.set(key, sourceCatalogSignature(), merged, effectiveComplete)
 }
 
 /** 打开面板时的入口：就是「不刷新地 startSearch()」。 */
@@ -494,6 +560,7 @@ function openAvailableSourceSSE(mode: AvailableSourceMode, refresh = false) {
     lastIndex: mode === 'loadMore' ? lastIndex.value : -1,
     concurrentCount: AVAILABLE_CONCURRENT_COUNT,
     refresh: refresh ? 1 : undefined,
+    bookSourceGroup: selectedSourceGroup.value || undefined,
   })
   availableSourceSSE = stream
 
@@ -839,6 +906,41 @@ async function handleSwitch(res: SearchBook) {
   letter-spacing: 0.05em;
   opacity: 0.4;
   font-weight: 600;
+}
+
+.section-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 20px 6px;
+}
+
+.section-header-row .section-label {
+  padding: 0;
+}
+
+.source-group-select {
+  max-width: 170px;
+  min-width: 110px;
+  height: 28px;
+  padding: 0 24px 0 10px;
+  font-size: 12px;
+  color: inherit;
+  background: rgba(128, 128, 128, 0.12);
+  border: 1px solid rgba(128, 128, 128, 0.24);
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+}
+
+.source-group-select:focus {
+  border-color: var(--color-primary, #d97706);
+}
+
+.source-group-select option {
+  color: var(--color-text, #1f2937);
+  background: var(--color-bg-elevated, #ffffff);
 }
 
 .source-item {

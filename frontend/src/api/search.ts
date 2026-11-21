@@ -52,6 +52,7 @@ export function getAvailableBookSource(params: {
   lastIndex?: number
   resultLimit?: number
   concurrentCount?: number
+  bookSourceGroup?: string
 }) {
   return post<SearchBook[] | AvailableBookSourceResult>('/getAvailableBookSource', params).then(
     (r) => normalizeAvailableBookSourceResult(r.data),
@@ -67,6 +68,7 @@ export function getAvailableBookSourceSSE(params: {
   lastIndex?: number
   resultLimit?: number
   concurrentCount?: number
+  bookSourceGroup?: string
 }) {
   const taskId = newSseTaskId('available-source')
   return openSse(
@@ -81,6 +83,7 @@ export function getAvailableBookSourceSSE(params: {
       lastIndex: params.lastIndex ?? -1,
       ...(typeof params.resultLimit !== 'undefined' ? { resultLimit: params.resultLimit } : {}),
       concurrentCount: params.concurrentCount ?? 8,
+      ...(params.bookSourceGroup ? { bookSourceGroup: params.bookSourceGroup } : {}),
     },
     { cancel: { command: 'cancel_book_search', taskId } },
   )

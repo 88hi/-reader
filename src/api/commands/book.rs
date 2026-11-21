@@ -382,6 +382,8 @@ pub struct GetAvailableBookSourceRequest {
     concurrent_count: Option<i32>,
     #[serde(rename = "taskId")]
     task_id: Option<String>,
+    #[serde(rename = "bookSourceGroup")]
+    book_source_group: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2520,10 +2522,11 @@ pub async fn get_available_book_source(
 
     // Try to find book by URL first, then by name+author
     let book_url = req.url.clone();
-    let sources = state.book_source_service.list_enabled(&user_ns).await?;
+    let mut sources = state.book_source_service.list_enabled(&user_ns).await?;
+    let has_group_filter = filter_sources_by_group(&mut sources, req.book_source_group.as_deref());
     let enabled_source_url_set = enabled_source_urls(&sources);
 
-    if !paged_request {
+    if !paged_request && !has_group_filter {
         if let Some(ref url) = book_url {
             if let Some(list) = state
                 .book_service
@@ -2696,6 +2699,7 @@ pub async fn get_available_book_source_sse(
     // 只能落进 pending 而无人消费(既泄漏记录, 也让这段缓存推送无法被取消)。
     let cancel_guard = SearchCancellationGuard::register(req.task_id.as_deref());
     let mut sources = state.book_source_service.list_enabled(&user_ns).await?;
+    let has_group_filter = filter_sources_by_group(&mut sources, req.book_source_group.as_deref());
     let enabled_source_url_set = enabled_source_urls(&sources);
 
     let book = if let Some(ref url) = book_url {
@@ -2723,7 +2727,7 @@ pub async fn get_available_book_source_sse(
         source_identity_url(&source.book_source_url) != source_identity_url(&book.origin)
     });
 
-    if !refresh && last_index_start < 0 {
+    if !has_group_filter && !refresh && last_index_start < 0 {
         if let Some(ref url) = book_url {
             if let Some(cached) = state
                 .book_service
@@ -3267,6 +3271,30 @@ fn should_use_available_source_cache(
     last_index: Option<i32>,
 ) -> bool {
     !refresh && result_limit.is_none() && last_index.is_none()
+}
+
+fn filter_sources_by_group(
+    sources: &mut Vec<crate::model::book_source::BookSource>,
+    group: Option<&str>,
+) -> bool {
+    let Some(group) = group.map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    if group == "__ungrouped__" {
+        sources.retain(|source| {
+            source
+                .book_source_group
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        });
+    } else {
+        sources.retain(|source| {
+            crate::service::book_source_service::book_source_has_group(source, group)
+        });
+    }
+    true
 }
 
 fn fallback_available_book(req: &GetAvailableBookSourceRequest) -> Option<Book> {
@@ -4014,6 +4042,7 @@ mod tests {
             result_limit: None,
             concurrent_count: None,
             task_id: None,
+            book_source_group: None,
         };
 
         let book = fallback_available_book(&req).expect("fallback book");
