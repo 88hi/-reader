@@ -1,32 +1,81 @@
 <template>
-  <div ref="resultsContainerRef" class="search-results" @scroll="handleResultsScroll">
+  <div
+    ref="resultsContainerRef"
+    class="search-results"
+    :class="{ 'is-switch-mode': isSwitchMode }"
+    @scroll="handleResultsScroll"
+  >
     <div class="search-header">
-      <h2>
-        搜索 "{{ searchKey }}"
-        <span v-if="isSearching" class="searching-indicator">
-          <span class="dot-pulse"></span>
-          {{ searchProgressText }}
-        </span>
-        <span v-else class="result-count">
-          ({{ rankedResults.length }} 个结果<template v-if="searchProgress.totalSources > 0"> · 已扫 {{ searchProgress.totalSources }} 个书源</template>)
-        </span>
-        <!-- 结果来自会话缓存时标一下；点它可重搜。
-             原来是单独一行提示条（"已显示上次的搜索结果 / 重新搜索"），既多占
-             一行又容易被重复渲染，改成一枚可点的角标。 -->
-        <button
-          v-if="resultsFromCache"
-          type="button"
-          class="cache-badge"
-          title="结果来自上次搜索，点击重新搜索"
-          @click="refreshSearch"
-        >缓存 ⟳</button>
-      </h2>
-      <button class="back-btn" @click="backToShelf">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-          <path d="M18 6 6 18M6 6l12 12" />
-        </svg>
-        返回书架
-      </button>
+      <div class="search-header-main">
+        <h2>
+          <template v-if="isSwitchMode">
+            切换书源
+            <span v-if="currentBook?.name" class="switch-book-badge" :title="currentBook.name">
+              《{{ currentBook.name }}》
+            </span>
+          </template>
+          <template v-else>
+            搜索 "{{ searchKey }}"
+          </template>
+          <span v-if="switchLoading" class="searching-indicator">
+            <span class="dot-pulse"></span>
+            正在切换书源…
+          </span>
+          <span v-else-if="isSearching" class="searching-indicator">
+            <span class="dot-pulse"></span>
+            {{ searchProgressText }}
+          </span>
+          <span v-else class="result-count">
+            ({{ rankedResults.length }} 个结果<template v-if="searchProgress.totalSources > 0"> · 已扫 {{ searchProgress.totalSources }} 个书源</template>)
+          </span>
+          <!-- 结果来自会话缓存时标一下；点它可重搜。 -->
+          <button
+            v-if="resultsFromCache && !isSearching"
+            type="button"
+            class="cache-badge"
+            title="结果来自上次搜索，点击重新搜索"
+            @click="refreshSearch"
+          >缓存 ⟳</button>
+        </h2>
+        <div v-if="isSwitchMode && currentBook" class="switch-current-meta">
+          <span>当前书源：{{ currentSourceLabel }}</span>
+          <span v-if="currentBook.author">· {{ currentBook.author }}</span>
+        </div>
+      </div>
+
+      <div class="search-header-actions">
+        <form v-if="isSwitchMode" class="switch-search-form" @submit.prevent="submitSwitchSearch">
+          <input
+            v-model="switchInputKey"
+            type="text"
+            class="switch-search-input"
+            placeholder="输入书名搜索书源..."
+          />
+          <button
+            v-if="isSearching"
+            type="button"
+            class="back-btn"
+            @click="stopCurrentSearch"
+          >停止</button>
+          <button
+            v-else
+            type="submit"
+            class="back-btn primary"
+          >搜索</button>
+        </form>
+        <button v-if="isSwitchMode" type="button" class="back-btn" @click="emit('close')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+          关闭
+        </button>
+        <button v-else type="button" class="back-btn" @click="backToShelf">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+          返回书架
+        </button>
+      </div>
     </div>
 
     <div class="search-filters">
@@ -34,18 +83,18 @@
         <button
           type="button"
           class="filter-tab"
-          :class="{ active: searchScope === 'all' }"
-          @click="searchScope = 'all'"
-        >
-          全部书源
-        </button>
-        <button
-          type="button"
-          class="filter-tab"
           :class="{ active: searchScope === 'group' }"
           @click="searchScope = 'group'"
         >
           按分组
+        </button>
+        <button
+          type="button"
+          class="filter-tab"
+          :class="{ active: searchScope === 'all' }"
+          @click="searchScope = 'all'"
+        >
+          全部书源
         </button>
         <button
           type="button"
@@ -58,7 +107,8 @@
       </div>
 
       <div v-if="searchScope === 'group'" class="filter-select-wrap">
-        <select v-model="selectedGroup" class="filter-select">
+        <select v-model="selectedGroup" class="filter-select" :disabled="sourceGroups.length === 0">
+          <option v-if="sourceGroups.length === 0" value="">暂无书源分组</option>
           <option v-for="group in sourceGroups" :key="group" :value="group">
             {{ group }}
           </option>
@@ -75,6 +125,7 @@
     </div>
 
     <div class="search-body-layout">
+      <!-- 第一列：命中书源 -->
       <aside v-if="resultSourceSummaries.length > 0" class="search-sources-sidebar" aria-label="命中书源列表">
         <div class="sidebar-header">
           <span>命中书源</span>
@@ -106,29 +157,112 @@
         </div>
       </aside>
 
+      <!-- 第二列：单列长条书籍列表 -->
       <div class="search-books-pane" :class="{ 'is-split': Boolean(previewBook) }">
-        <BookGrid
-          :books="displayedResults"
-          :columns="previewBook ? 1 : 0"
-          :is-search="true"
-          :shelf-book-urls="shelfBookUrls"
-          :shelf-book-keys="shelfBookKeys"
-          :loading="isSearching && rankedResults.length === 0"
-          :animate="false"
-          empty-text="未找到相关书籍"
-          @click="openBookTocPreview"
-          @info="handleBookInfo"
-          @addToShelf="handleAddToShelf"
-          @contextmenu="handleBookContextMenu"
-        />
+        <div v-if="isSearching && rankedResults.length === 0" class="books-empty-state">
+          <span class="dot-pulse"></span>
+          <span>{{ searchProgressText }}</span>
+        </div>
+        <div v-else-if="displayedResults.length === 0" class="books-empty-state">
+          <span>未找到相关书籍</span>
+        </div>
+        <div v-else class="search-book-list" role="list">
+          <div
+            v-for="book in displayedResults"
+            :key="`${book.origin}::${book.bookUrl}`"
+            class="search-book-row"
+            :class="{
+              active: isPreviewBook(book),
+              current: isCurrentSourceBook(book),
+            }"
+            role="listitem"
+            @click="openBookTocPreview(book)"
+            @contextmenu.prevent="handleBookContextMenu({ book, event: $event })"
+          >
+            <div class="search-book-cover">
+              <img
+                v-if="book.coverUrl && !failedCoverKeys.has(`${book.origin}::${book.bookUrl}`)"
+                :src="getCoverUrl(book.coverUrl, book.origin)"
+                :alt="book.name"
+                loading="lazy"
+                @error="markCoverFailed(book)"
+              />
+              <div v-else class="search-book-cover-fallback">
+                <span>{{ (book.name || '书').slice(0, 1) }}</span>
+              </div>
+            </div>
+
+            <div class="search-book-info">
+              <div class="search-book-title-line">
+                <span class="search-book-title" :title="book.name">{{ book.name }}</span>
+                <span v-if="isCurrentSourceBook(book)" class="search-book-chip current">当前书源</span>
+              </div>
+              <div class="search-book-meta-line">
+                <span class="search-book-author">{{ book.author || '未知作者' }}</span>
+                <span class="search-book-chip source" :title="book.originName || book.origin">
+                  {{ book.originName || book.origin }}
+                </span>
+                <span v-if="book.originGroup" class="search-book-chip group" :title="book.originGroup">
+                  {{ book.originGroup }}
+                </span>
+                <span
+                  v-if="book.sourceCandidates && book.sourceCandidates.length > 1"
+                  class="search-book-chip multi"
+                >
+                  {{ book.sourceCandidates.length }} 源
+                </span>
+              </div>
+              <div v-if="book.lastChapter" class="search-book-latest" :title="book.lastChapter">
+                最新：{{ book.lastChapter }}
+              </div>
+            </div>
+
+            <div class="search-book-actions" @click.stop>
+              <template v-if="isSwitchMode">
+                <button
+                  type="button"
+                  class="row-action-btn"
+                  :class="{ primary: !isCurrentSourceBook(book), muted: isCurrentSourceBook(book) }"
+                  :disabled="switchLoading || isCurrentSourceBook(book)"
+                  @click="handleSwitchToBook(book)"
+                >
+                  {{ isCurrentSourceBook(book) ? '当前源' : '切换此源' }}
+                </button>
+              </template>
+              <template v-else>
+                <button
+                  type="button"
+                  class="row-action-btn"
+                  :class="{ muted: isInShelf(book), primary: !isInShelf(book) }"
+                  :disabled="isInShelf(book)"
+                  @click="handleAddToShelf(book)"
+                >
+                  {{ isInShelf(book) ? '已加入' : '+ 书架' }}
+                </button>
+              </template>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <!-- 第三列：点击书籍卡片后显示目录 -->
+      <!-- 第三列：点击书籍后显示目录，点击章节加载正文预览 -->
       <aside v-if="previewBook" class="search-toc-pane" aria-label="书籍目录预览">
         <div class="sidebar-header">
           <span class="toc-pane-title" :title="previewBook.name">{{ previewBook.name }}</span>
           <div class="toc-pane-actions">
-            <button type="button" class="toc-mini-btn" @click="handleBookClick(previewBook)">详情</button>
+            <button
+              v-if="isSwitchMode"
+              type="button"
+              class="toc-mini-btn primary"
+              :disabled="switchLoading || isCurrentSourceBook(previewBook)"
+              @click="handleSwitchToBook(previewBook)"
+            >{{ isCurrentSourceBook(previewBook) ? '当前源' : '切换此源' }}</button>
+            <button
+              v-else
+              type="button"
+              class="toc-mini-btn"
+              @click="handleBookClick(previewBook)"
+            >详情</button>
             <button type="button" class="toc-mini-btn" title="关闭目录" @click="closeBookTocPreview">✕</button>
           </div>
         </div>
@@ -144,30 +278,42 @@
             :key="`${chapter.index}-${chapter.url}`"
             type="button"
             class="sidebar-source-item"
-            :class="{ active: hoveredSearchChapter?.url === chapter.url && hoveredSearchChapter?.index === chapter.index }"
-            @mouseenter="scheduleSearchHoverPreview(chapter)"
-            @click="handleBookClick(previewBook)"
+            :class="{ active: selectedSearchChapter?.url === chapter.url && selectedSearchChapter?.index === chapter.index }"
+            @click="selectSearchChapter(chapter)"
           >
             <span class="sidebar-source-name">{{ chapter.title }}</span>
           </button>
         </div>
       </aside>
 
-      <!-- 第四列：鼠标悬停目录时实时加载并预览正文 -->
-      <section v-if="previewBook && hoveredSearchChapter" class="search-content-pane" aria-label="章节正文预览">
+      <!-- 第四列：点击章节后加载并预览正文 -->
+      <section v-if="previewBook && selectedSearchChapter" class="search-content-pane" aria-label="章节正文预览">
         <div class="sidebar-header">
-          <span class="toc-pane-title" :title="hoveredSearchChapter.title">{{ hoveredSearchChapter.title }}</span>
-          <button type="button" class="toc-mini-btn primary" @click="handleBookClick(previewBook)">打开阅读</button>
+          <span class="toc-pane-title" :title="selectedSearchChapter.title">{{ selectedSearchChapter.title }}</span>
+          <button
+            v-if="isSwitchMode"
+            type="button"
+            class="toc-mini-btn primary"
+            :disabled="switchLoading"
+            @click="handleSwitchToBook(previewBook, selectedSearchChapter)"
+          >切换到本章阅读</button>
+          <button
+            v-else
+            type="button"
+            class="toc-mini-btn primary"
+            @click="handleBookClick(previewBook)"
+          >打开阅读</button>
         </div>
-        <div v-if="hoveredSearchLoading" class="pane-placeholder">正在加载正文预览...</div>
-        <div v-else-if="hoveredSearchError" class="pane-placeholder">{{ hoveredSearchError }}</div>
+        <div v-if="selectedSearchLoading" class="pane-placeholder">正在加载正文预览...</div>
+        <div v-else-if="selectedSearchError" class="pane-placeholder">{{ selectedSearchError }}</div>
         <div v-else class="search-preview-body">
-          <p v-for="(line, idx) in hoveredSearchParagraphs" :key="idx">{{ line }}</p>
+          <p v-for="(line, idx) in selectedSearchParagraphs" :key="idx">{{ line }}</p>
         </div>
       </section>
     </div>
 
     <BookDetailModal
+      v-if="!isSwitchMode"
       v-model="showBookDetail"
       :book="selectedBook"
     />
@@ -182,7 +328,7 @@ import { useSourceStore } from '../stores/source'
 import { searchBookMultiSSE } from '../api/search'
 import { deleteBookSource, pinBookSource, saveBookSource } from '../api/source'
 import type { SseLike } from '../api/sse'
-import { getBookContent, getBookInfo, getChapterList, saveBook } from '../api/bookshelf'
+import { getBookContent, getBookInfo, getChapterList, getCoverUrl, saveBook } from '../api/bookshelf'
 import { createCoverCacheSession } from '../utils/coverCacheSession'
 import { getSearchSessionCache, searchSessionKey } from '../utils/searchSessionCache'
 import { shouldResearchForSourceChange } from '../utils/searchSourceChange'
@@ -195,29 +341,148 @@ import {
   searchMergeKey,
   shelfMatchKey,
 } from '../utils/searchRank'
-import BookGrid from './BookGrid.vue'
 import BookDetailModal from './BookDetailModal.vue'
 import { showContextMenu } from '../composables/useContextMenu'
 import type { Book, BookChapter, SearchBook } from '../types'
 
-import { storeToRefs } from 'pinia'
+const props = withDefaults(defineProps<{
+  mode?: 'search' | 'switch-source'
+  currentBook?: Book | null
+  switchLoading?: boolean
+}>(), {
+  mode: 'search',
+  currentBook: null,
+  switchLoading: false,
+})
 
 const emit = defineEmits<{
   back: []
+  close: []
+  'switch-source': [payload: { book: Book | SearchBook; chapter?: BookChapter | null }]
 }>()
 
 const shelfStore = useBookshelfStore()
 const appStore = useAppStore()
 const sourceStore = useSourceStore()
 
-const {
-  searchKey,
-  searchResults: results,
-  isSearching,
-  searchScope,
-  searchGroup: selectedGroup,
-  searchSourceUrl: selectedSourceUrl,
-} = storeToRefs(shelfStore)
+const isSwitchMode = computed(() => props.mode === 'switch-source')
+
+// 换源模式使用独立局部状态，避免污染书架的搜索状态
+const localSearchKey = ref(props.currentBook?.name?.trim() || '')
+const localSearchResults = ref<SearchBook[]>([])
+const localIsSearching = ref(false)
+const localSearchScope = ref<'all' | 'group' | 'source'>('group')
+const localSelectedGroup = ref('')
+const localSelectedSourceUrl = ref('')
+const switchInputKey = ref(props.currentBook?.name?.trim() || '')
+const failedCoverKeys = ref<Set<string>>(new Set())
+
+const searchKey = computed({
+  get: () => (isSwitchMode.value ? localSearchKey.value : shelfStore.searchKey),
+  set: (v: string) => {
+    if (isSwitchMode.value) localSearchKey.value = v
+    else shelfStore.searchKey = v
+  },
+})
+
+const results = computed<SearchBook[]>({
+  get: () => (isSwitchMode.value ? localSearchResults.value : shelfStore.searchResults),
+  set: (v: SearchBook[]) => {
+    if (isSwitchMode.value) localSearchResults.value = v
+    else shelfStore.searchResults = v
+  },
+})
+
+const isSearching = computed({
+  get: () => (isSwitchMode.value ? localIsSearching.value : shelfStore.isSearching),
+  set: (v: boolean) => {
+    if (isSwitchMode.value) localIsSearching.value = v
+    else shelfStore.isSearching = v
+  },
+})
+
+const searchScope = computed<'all' | 'group' | 'source'>({
+  get: () => (isSwitchMode.value ? localSearchScope.value : shelfStore.searchScope),
+  set: (v: 'all' | 'group' | 'source') => {
+    if (isSwitchMode.value) localSearchScope.value = v
+    else shelfStore.searchScope = v
+  },
+})
+
+const selectedGroup = computed({
+  get: () => (isSwitchMode.value ? localSelectedGroup.value : shelfStore.searchGroup),
+  set: (v: string) => {
+    if (isSwitchMode.value) localSelectedGroup.value = v
+    else shelfStore.searchGroup = v
+  },
+})
+
+const selectedSourceUrl = computed({
+  get: () => (isSwitchMode.value ? localSelectedSourceUrl.value : shelfStore.searchSourceUrl),
+  set: (v: string) => {
+    if (isSwitchMode.value) localSelectedSourceUrl.value = v
+    else shelfStore.searchSourceUrl = v
+  },
+})
+
+watch(() => props.currentBook?.name, (name) => {
+  if (!isSwitchMode.value) return
+  const trimmed = (name || '').trim()
+  switchInputKey.value = trimmed
+  localSearchKey.value = trimmed
+})
+
+const currentSourceLabel = computed(() => {
+  const book = props.currentBook
+  if (!book) return ''
+  return book.originName || sourceByUrl.value.get(book.origin)?.bookSourceName || book.origin
+})
+
+function markCoverFailed(book: Book | SearchBook) {
+  const key = `${book.origin}::${book.bookUrl}`
+  if (failedCoverKeys.value.has(key)) return
+  const next = new Set(failedCoverKeys.value)
+  next.add(key)
+  failedCoverKeys.value = next
+}
+
+function isPreviewBook(book: Book | SearchBook) {
+  return Boolean(
+    previewBook.value
+    && previewBook.value.origin === book.origin
+    && previewBook.value.bookUrl === book.bookUrl,
+  )
+}
+
+function isCurrentSourceBook(book: Book | SearchBook) {
+  const cur = props.currentBook
+  if (!isSwitchMode.value || !cur) return false
+  return cur.origin === book.origin && cur.bookUrl === book.bookUrl
+}
+
+function isInShelf(book: Book | SearchBook) {
+  return shelfBookUrls.value.has(book.bookUrl) || shelfBookKeys.value.has(shelfMatchKey(book))
+}
+
+function submitSwitchSearch() {
+  const next = switchInputKey.value.trim()
+  if (!next) return
+  if (localSearchKey.value === next) {
+    doSearch(next, true)
+  } else {
+    localSearchKey.value = next
+  }
+}
+
+function stopCurrentSearch() {
+  searchGeneration += 1
+  closeEventSource()
+  isSearching.value = false
+}
+
+function handleSwitchToBook(book: Book | SearchBook, chapter?: BookChapter | null) {
+  emit('switch-source', { book, chapter: chapter ?? null })
+}
 
 let eventSource: SseLike | null = null
 let searchGeneration = 0
@@ -472,16 +737,15 @@ const previewTocLoading = ref(false)
 const previewTocError = ref('')
 let previewTocToken = 0
 
-const hoveredSearchChapter = ref<BookChapter | null>(null)
-const hoveredSearchContent = ref('')
-const hoveredSearchLoading = ref(false)
-const hoveredSearchError = ref('')
+const selectedSearchChapter = ref<BookChapter | null>(null)
+const selectedSearchContent = ref('')
+const selectedSearchLoading = ref(false)
+const selectedSearchError = ref('')
 const searchPreviewCache = new Map<string, string>()
-let searchHoverTimer: number | null = null
-let searchHoverToken = 0
+let searchPreviewToken = 0
 
-const hoveredSearchParagraphs = computed(() =>
-  hoveredSearchContent.value
+const selectedSearchParagraphs = computed(() =>
+  selectedSearchContent.value
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>/gi, '\n')
     .replace(/<[^>]+>/g, '')
@@ -490,16 +754,12 @@ const hoveredSearchParagraphs = computed(() =>
     .filter(Boolean),
 )
 
-function resetSearchHoverPreview() {
-  if (searchHoverTimer !== null) {
-    window.clearTimeout(searchHoverTimer)
-    searchHoverTimer = null
-  }
-  searchHoverToken += 1
-  hoveredSearchChapter.value = null
-  hoveredSearchContent.value = ''
-  hoveredSearchLoading.value = false
-  hoveredSearchError.value = ''
+function resetSearchChapterPreview() {
+  searchPreviewToken += 1
+  selectedSearchChapter.value = null
+  selectedSearchContent.value = ''
+  selectedSearchLoading.value = false
+  selectedSearchError.value = ''
 }
 
 function closeBookTocPreview() {
@@ -508,7 +768,7 @@ function closeBookTocPreview() {
   previewTocLoading.value = false
   previewTocError.value = ''
   previewTocToken += 1
-  resetSearchHoverPreview()
+  resetSearchChapterPreview()
 }
 
 async function openBookTocPreview(book: Book | SearchBook) {
@@ -516,7 +776,7 @@ async function openBookTocPreview(book: Book | SearchBook) {
   previewChapters.value = []
   previewTocError.value = ''
   previewTocLoading.value = true
-  resetSearchHoverPreview()
+  resetSearchChapterPreview()
   const token = ++previewTocToken
   try {
     let tocUrl = book.bookUrl
@@ -544,48 +804,46 @@ async function openBookTocPreview(book: Book | SearchBook) {
   }
 }
 
-function scheduleSearchHoverPreview(chapter: BookChapter) {
+async function selectSearchChapter(chapter: BookChapter) {
   const book = previewBook.value
   if (!book) return
-  if (hoveredSearchChapter.value?.url === chapter.url && hoveredSearchChapter.value?.index === chapter.index) return
-  hoveredSearchChapter.value = chapter
-  hoveredSearchError.value = ''
+  if (selectedSearchChapter.value?.url === chapter.url && selectedSearchChapter.value?.index === chapter.index) {
+    return
+  }
+  selectedSearchChapter.value = chapter
+  selectedSearchError.value = ''
 
   const cacheKey = `${book.origin}::${chapter.url}`
   const cached = searchPreviewCache.get(cacheKey)
   if (cached !== undefined) {
-    hoveredSearchContent.value = cached
-    hoveredSearchLoading.value = false
+    selectedSearchContent.value = cached
+    selectedSearchLoading.value = false
     return
   }
 
-  if (searchHoverTimer !== null) window.clearTimeout(searchHoverTimer)
-  hoveredSearchLoading.value = true
-  hoveredSearchContent.value = ''
-  const token = ++searchHoverToken
-  searchHoverTimer = window.setTimeout(async () => {
-    searchHoverTimer = null
-    try {
-      const content = await getBookContent({
-        bookUrl: book.bookUrl,
-        chapterUrl: chapter.url,
-        bookSourceUrl: book.origin,
-        chapterTitle: chapter.title,
-        index: chapter.index,
-      })
-      if (token !== searchHoverToken) return
-      const text = typeof content === 'string' ? content : ''
-      searchPreviewCache.set(cacheKey, text)
-      hoveredSearchContent.value = text || '（本章暂无正文内容）'
-    } catch (e: unknown) {
-      if (token !== searchHoverToken) return
-      hoveredSearchError.value = (e as Error).message || '正文加载失败'
-    } finally {
-      if (token === searchHoverToken) {
-        hoveredSearchLoading.value = false
-      }
+  selectedSearchLoading.value = true
+  selectedSearchContent.value = ''
+  const token = ++searchPreviewToken
+  try {
+    const content = await getBookContent({
+      bookUrl: book.bookUrl,
+      chapterUrl: chapter.url,
+      bookSourceUrl: book.origin,
+      chapterTitle: chapter.title,
+      index: chapter.index,
+    })
+    if (token !== searchPreviewToken) return
+    const text = typeof content === 'string' ? content : ''
+    searchPreviewCache.set(cacheKey, text)
+    selectedSearchContent.value = text || '（本章暂无正文内容）'
+  } catch (e: unknown) {
+    if (token !== searchPreviewToken) return
+    selectedSearchError.value = (e as Error).message || '正文加载失败'
+  } finally {
+    if (token === searchPreviewToken) {
+      selectedSearchLoading.value = false
     }
-  }, 240)
+  }
 }
 
 watch(searchKey, () => {
@@ -594,7 +852,7 @@ watch(searchKey, () => {
 })
 
 onUnmounted(() => {
-  resetSearchHoverPreview()
+  resetSearchChapterPreview()
 })
 
 /**
@@ -606,7 +864,7 @@ onUnmounted(() => {
  */
 function loadMore() {
   if (isSearching.value) return
-  const key = shelfStore.searchKey
+  const key = searchKey.value
   if (!key) return
   // 书源清单可能按分组/单源过滤，前端拿不到后端实际列表长度，
   // 因此只以后端的 `hasMore` 为准，不用 sourceOptions 猜。
@@ -625,10 +883,10 @@ function loadMore() {
 
 /** 从指定书源下标续拉当前搜索页（-1 = 从头开始）。 */
 function continueSearchFrom(startIndex: number) {
-  const key = shelfStore.searchKey
+  const key = searchKey.value
   if (!key) return
   const sessionKey = currentSearchSessionKey(key)
-  shelfStore.isSearching = true
+  isSearching.value = true
   streamSearch(key, sessionKey, startIndex, searchPage.value)
 }
 
@@ -649,7 +907,7 @@ function closeEventSource() {
 
 /** 用户主动重搜当前条件（丢掉这份缓存）。 */
 function refreshSearch() {
-  const key = shelfStore.searchKey
+  const key = searchKey.value
   if (!key) return
   const sessionKey = currentSearchSessionKey(key)
   // 只丢当前这一组条件的结果；别把其它关键词的缓存也清掉。
@@ -685,6 +943,9 @@ function ensureSearchSelection() {
     const selectedGroupStillValid = selectedGroup.value && sourceGroups.value.includes(selectedGroup.value)
     if (!selectedGroupStillValid && sourceGroups.value.length > 0) {
       selectedGroup.value = sourceGroups.value[0]
+    } else if (sourceGroups.value.length === 0 && sourceOptions.value.length > 0) {
+      // 没有任何书源分组时自动回落到全部书源，避免卡在空分组
+      searchScope.value = 'all'
     }
   }
   if (searchScope.value === 'source') {
@@ -696,7 +957,7 @@ function ensureSearchSelection() {
 }
 
 /** 当前搜索条件对应的缓存键。 */
-function currentSearchSessionKey(key = shelfStore.searchKey): string {
+function currentSearchSessionKey(key = searchKey.value): string {
   return searchSessionKey({
     keyword: key,
     scope: searchScope.value,
@@ -725,15 +986,15 @@ function doSearch(key: string, force = false) {
 
   if (searchScope.value === 'group' && !selectedGroup.value) {
     releaseSearchCovers()
-    shelfStore.searchResults = []
-    shelfStore.isSearching = false
+    results.value = []
+    isSearching.value = false
     return
   }
 
   if (searchScope.value === 'source' && !selectedSourceUrl.value) {
     releaseSearchCovers()
-    shelfStore.searchResults = []
-    shelfStore.isSearching = false
+    results.value = []
+    isSearching.value = false
     return
   }
 
@@ -745,7 +1006,7 @@ function doSearch(key: string, force = false) {
       // 不会又等一次全量搜索、也不会因为批次没回来而少一半。
       // **不能在这里 releaseSearchCovers()** —— 那会把刚复用的封面也清掉，
       // 结果页会整屏重新下载图片。
-      shelfStore.searchResults = cached.results.slice()
+      results.value = cached.results.slice()
       resultsFromCache.value = true
       // 断点要在续搜前恢复：`streamSearch` 里每次落库都读它。
       searchLastIndex = cached.lastIndex
@@ -763,12 +1024,12 @@ function doSearch(key: string, force = false) {
       // 隔太久书源可能已经增删过），直接按新搜索重跑，别拿过期结果垫底。
       const expiredAndIncomplete = !cached.complete && searchSessionCache.isStale(cached)
       if (cached.complete) {
-        shelfStore.isSearching = false
+        isSearching.value = false
       } else if (expiredAndIncomplete) {
         searchSessionCache.delete(sessionKey)
         resultsFromCache.value = false
-        shelfStore.searchResults = []
-        shelfStore.isSearching = true
+        results.value = []
+        isSearching.value = true
         searchLastIndex = -1
         searchPage.value = 1
         hasMorePages.value = false
@@ -780,7 +1041,7 @@ function doSearch(key: string, force = false) {
         // 手机端这时搜索仍在 SearchViewModel 里继续跑，回来接着看即可；
         // 本项目的搜索页组件会被卸载、流也随之关闭，所以这里**续搜**：
         // 先把已有结果摆出来，再从断点接着要后面的批次，而不是从头再来。
-        shelfStore.isSearching = true
+        isSearching.value = true
         streamSearch(key, sessionKey, cached.lastIndex, Math.max(1, cached.page))
       }
       nextTick(() => {
@@ -797,8 +1058,8 @@ function doSearch(key: string, force = false) {
   releaseSearchCovers()
   resultsFromCache.value = false
 
-  shelfStore.searchResults = []
-  shelfStore.isSearching = true
+  results.value = []
+  isSearching.value = true
   streamSearch(key, sessionKey, -1, 1)
 }
 
@@ -827,7 +1088,7 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
   const isCurrentSearch = () => (
     generation === searchGeneration
     && eventSource === stream
-    && shelfStore.searchKey === key
+    && searchKey.value === key
   )
 
   /** 落缓存。
@@ -848,11 +1109,11 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
     moreSources = hasMoreSources.value,
   ) => {
     if (!sessionKey || generation !== searchGeneration) return
-    if (shelfStore.searchKey !== key) return
+    if (searchKey.value !== key) return
     searchSessionCache.set(
       sessionKey,
       key,
-      shelfStore.searchResults.slice(),
+      results.value.slice(),
       complete,
       lastIndex,
       page,
@@ -882,7 +1143,7 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
       }
       if (data.data && Array.isArray(data.data)) {
         if (data.data.length > 0) pageHadResults = true
-        const byKey = new Map(shelfStore.searchResults.map((r) => [searchMergeKey(r), r]))
+        const byKey = new Map(results.value.map((r) => [searchMergeKey(r), r]))
         coverCacheSession.collect(data.data)
         for (const b of data.data) {
           if (!isSearchResultRelevant(b, key)) continue
@@ -894,7 +1155,7 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
             byKey.set(mergeKey, initializeSearchResult(b))
           }
         }
-        shelfStore.searchResults = Array.from(byKey.values())
+        results.value = Array.from(byKey.values())
         // 边收边存：中途离开也不至于什么都没有。
         const nextIndex = typeof data.lastIndex === 'number' ? data.lastIndex : searchLastIndex
         // 书源按完成顺序到达, 断点只能前进不能回退。
@@ -926,7 +1187,7 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
     if (typeof payload?.lastIndex === 'number') {
       searchLastIndex = Math.max(searchLastIndex, payload.lastIndex)
     }
-    shelfStore.isSearching = false
+    isSearching.value = false
     stream.close()
     eventSource = null
     // 单次续拉只覆盖部分书源时, `hasMorePages` 仅代表这一批; 同一页
@@ -947,7 +1208,7 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
 
   stream.addEventListener('error', () => {
     if (!isCurrentSearch()) return
-    shelfStore.isSearching = false
+    isSearching.value = false
     stream.close()
     eventSource = null
     commitSession(false, searchLastIndex)
@@ -955,7 +1216,7 @@ function streamSearch(key: string, sessionKey: string, startIndex: number, pageN
 
   stream.onerror = () => {
     if (!isCurrentSearch()) return
-    shelfStore.isSearching = false
+    isSearching.value = false
     stream.close()
     eventSource = null
     commitSession(false, searchLastIndex)
@@ -981,7 +1242,7 @@ let mayUseSessionCache = true
 let lastSessionKey = ''
 
 watch(
-  [() => shelfStore.searchKey, searchScope, selectedGroup, selectedSourceUrl],
+  [searchKey, searchScope, selectedGroup, selectedSourceUrl],
   ([key]) => {
     ensureSearchSelection()
     if (key) {
@@ -997,8 +1258,8 @@ watch(
       mayUseSessionCache = true
       searchGeneration += 1
       closeEventSource()
-      shelfStore.searchResults = []
-      shelfStore.isSearching = false
+      results.value = []
+      isSearching.value = false
       resultsFromCache.value = false
     }
   },
@@ -1052,15 +1313,15 @@ onUnmounted(() => {
   // 卸载前补一次落库：虽然每收到一批就写过了，但「最后一批刚 push 完就切走」
   // 这种时刻，响应式赋值与写缓存之间可能还没轮到执行 —— 补这一次能兜住。
   // 此刻仍然 `isSearching` 说明搜索没跑完，标 incomplete 让回来时续搜。
-  const key = shelfStore.searchKey
+  const key = searchKey.value
   if (key) {
     const sessionKey = currentSearchSessionKey(key)
-    if (sessionKey && shelfStore.searchResults.length) {
+    if (sessionKey && results.value.length) {
       searchSessionCache.set(
         sessionKey,
         key,
-        shelfStore.searchResults.slice(),
-        !shelfStore.isSearching
+        results.value.slice(),
+        !isSearching.value
           && searchLastIndex >= 0
           && !hasMoreSources.value,
         searchLastIndex,
@@ -1077,7 +1338,7 @@ onUnmounted(() => {
   //   这轮搜索结束了，封面没有留着的理由 → 释放，否则这批图再没有回收点。
   // - `searchKey` 还在 = 进阅读页/详情页的临时离开，组件会重建。此时释放会让
   //   返回后整屏几十上百张封面重新下载（看起来像"又搜了一遍"，还更卡）→ 保留。
-  if (!shelfStore.searchKey) releaseSearchCovers()
+  if (!isSwitchMode.value && !searchKey.value) releaseSearchCovers()
 })
 
 // Clicking a search result (card body or cover) always opens the detail modal.
@@ -1118,9 +1379,20 @@ async function handleAddToShelf(book: Book | SearchBook) {
 }
 
 function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event: MouseEvent }) {
-  const inShelf = shelfBookUrls.value.has(book.bookUrl)
-    || shelfBookKeys.value.has(shelfMatchKey(book))
+  if (isSwitchMode.value) {
+    const isCurrent = isCurrentSourceBook(book)
+    showContextMenu(event, [
+      { label: '查看目录', action: () => openBookTocPreview(book) },
+      { divider: true },
+      isCurrent
+        ? { label: '已是当前书源', disabled: true }
+        : { label: '切换到此书源', action: () => handleSwitchToBook(book) },
+    ], book)
+    return
+  }
+  const inShelf = isInShelf(book)
   const menuItems = [
+    { label: '查看目录', action: () => openBookTocPreview(book) },
     { label: '查看详情', action: () => handleBookInfo(book) },
     { divider: true },
     inShelf
@@ -1136,7 +1408,37 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   height: 100%;
   min-height: 0;
   overflow: auto;
-  padding: 0 var(--space-6);
+  padding: 0 var(--space-6) var(--space-6);
+}
+
+.search-results.is-switch-mode {
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--space-4) var(--space-4);
+  overflow: hidden;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.search-results.is-switch-mode .search-body-layout {
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.search-results.is-switch-mode .search-sources-sidebar,
+.search-results.is-switch-mode .search-toc-pane,
+.search-results.is-switch-mode .search-content-pane {
+  position: static;
+  max-height: none;
+  height: 100%;
+}
+
+.search-results.is-switch-mode .search-books-pane {
+  height: 100%;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .search-header {
@@ -1145,6 +1447,14 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   justify-content: space-between;
   padding: var(--space-4) 0;
   gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.search-header-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .search-header h2 {
@@ -1152,7 +1462,55 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   font-weight: 700;
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.switch-book-badge {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-primary);
+  max-width: 240px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.switch-current-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.search-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.switch-search-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.switch-search-input {
+  width: 200px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+}
+
+.switch-search-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
 }
 
 .result-count {
@@ -1201,11 +1559,24 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   color: var(--color-text-secondary);
   border: 1px solid var(--color-border);
   transition: all var(--duration-fast);
+  cursor: pointer;
+  background: transparent;
 }
 
 .back-btn:hover {
   background: var(--color-bg-hover);
   color: var(--color-text);
+}
+
+.back-btn.primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+.back-btn.primary:hover {
+  opacity: 0.92;
+  color: #fff;
 }
 
 /* 「缓存」角标：标出结果来自上次搜索，不是刚搜的；点它重新搜索。
@@ -1389,8 +1760,206 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 }
 
 .search-books-pane.is-split {
-  flex: 0 0 320px;
-  width: 320px;
+  flex: 0 0 350px;
+  width: 350px;
+}
+
+.books-empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 180px;
+  padding: 28px 16px;
+  border: 1px dashed var(--color-border-light);
+  border-radius: var(--radius-lg);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.search-book-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.search-book-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-elevated);
+  cursor: pointer;
+  transition: border-color var(--duration-fast), background var(--duration-fast), box-shadow var(--duration-fast);
+}
+
+.search-book-row:hover {
+  border-color: var(--color-primary-border);
+  background: var(--color-bg-hover);
+}
+
+.search-book-row.active {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft-bg);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--color-primary) 12%, transparent);
+}
+
+.search-book-row.current {
+  border-color: color-mix(in srgb, var(--color-primary) 45%, var(--color-border-light));
+}
+
+.search-book-cover {
+  width: 44px;
+  height: 62px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--color-bg-hover);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+.search-book-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.search-book-cover-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(155deg, #2b4c6f 0%, #1c3148 100%);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.search-book-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.search-book-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.search-book-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-book-meta-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.search-book-author {
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-book-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 130px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-book-chip.source {
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  color: var(--color-primary);
+}
+
+.search-book-chip.group {
+  background: color-mix(in srgb, var(--color-border) 50%, transparent);
+  color: var(--color-text-secondary);
+}
+
+.search-book-chip.multi {
+  background: color-mix(in srgb, #10b981 14%, transparent);
+  color: #059669;
+}
+
+.search-book-chip.current {
+  background: var(--color-primary);
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.search-book-latest {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-book-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.row-action-btn {
+  padding: 5px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+
+.row-action-btn.primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+.row-action-btn.primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.row-action-btn.muted {
+  background: color-mix(in srgb, var(--color-border) 40%, transparent);
+  border-color: transparent;
+  color: var(--color-text-tertiary);
+  cursor: default;
+}
+
+.row-action-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
 }
 
 .search-toc-pane {

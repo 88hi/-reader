@@ -45,6 +45,7 @@
             'with-custom-background': hasReaderBackground,
             'drawer-translucent': hasTranslucentPanel,
             'drawer-wide': store.activePanel === 'settings',
+            'drawer-source-wide': store.activePanel === 'source',
           }"
           :style="{ background: chromeTheme.popup, color: chromeTheme.fontColor, colorScheme: readerColorScheme }"
         >
@@ -247,42 +248,63 @@
                 v-if="isDualPageActive && dualPageFlipActive && dualFlipSnapshot"
                 :key="`dual-flip-${dualPageFlipKey}`"
                 class="dual-book-flip-stage"
-                :style="{
-                  background: theme.body,
-                  '--dual-flip-duration': `${dualPageFlipDuration}ms`,
-                }"
+                :style="{ background: theme.body }"
                 aria-hidden="true"
               >
-                <div class="dual-book-under is-left" :style="{ background: theme.body }">
+                <!-- 底层固定页（新页在翻开侧逐渐露出，旧页在另一侧等待被新页覆盖） -->
+                <div class="dual-curl-page is-left" :style="{ background: theme.body }">
                   <div
                     class="chapter-text horizontal-page-content"
                     :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
                     v-html="dualFlipSnapshot.underLeft"
                   ></div>
                 </div>
-                <div class="dual-book-under is-right" :style="{ background: theme.body }">
+                <div class="dual-curl-page is-right" :style="{ background: theme.body }">
                   <div
                     class="chapter-text horizontal-page-content"
                     :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
                     v-html="dualFlipSnapshot.underRight"
                   ></div>
                 </div>
-                <div class="dual-book-leaf" :class="`is-${dualPageFlipDir}`">
-                  <div class="dual-book-leaf-face is-front" :style="{ background: theme.body }">
-                    <div
-                      class="chapter-text horizontal-page-content"
-                      :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
-                      v-html="dualFlipSnapshot.leafFront"
-                    ></div>
-                  </div>
-                  <div class="dual-book-leaf-face is-back" :style="{ background: theme.body }">
-                    <div
-                      class="chapter-text horizontal-page-content"
-                      :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
-                      v-html="dualFlipSnapshot.leafBack"
-                    ></div>
-                  </div>
+
+                <!-- 正在被掀起剥离的旧页 -->
+                <div
+                  class="dual-curl-page dual-curl-peeling"
+                  :class="dualPageFlipDir === 'next' ? 'is-right' : 'is-left'"
+                  :style="{
+                    background: theme.body,
+                    clipPath: dualCurlStyles.peelClip,
+                  }"
+                >
+                  <div
+                    class="chapter-text horizontal-page-content"
+                    :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
+                    v-html="dualFlipSnapshot.leafFront"
+                  ></div>
                 </div>
+
+                <!-- 翻过中缝后铺落的新页 -->
+                <div
+                  class="dual-curl-page dual-curl-landing"
+                  :class="dualPageFlipDir === 'next' ? 'is-left' : 'is-right'"
+                  :style="{
+                    background: theme.body,
+                    clipPath: dualCurlStyles.landClip,
+                  }"
+                >
+                  <div
+                    class="chapter-text horizontal-page-content"
+                    :style="{ '--p-spacing': config.paragraphSpacing + 'em' }"
+                    v-html="dualFlipSnapshot.leafBack"
+                  ></div>
+                </div>
+
+                <!-- 仿真卷页纸背圆柱光影与投射阴影 -->
+                <div
+                  class="dual-curl-fold"
+                  :class="`is-${dualPageFlipDir}`"
+                  :style="dualCurlStyles.foldStyle"
+                ></div>
               </div>
             </div>
           </section>
@@ -1793,18 +1815,79 @@ function beginHorizontalPageTurnGuard() {
   }, duration + 80)
 }
 
-/** 双页模式 3D 翻书动画状态。 */
+/** 双页模式仿真翻书（卷页）动画状态。 */
 const dualPageFlipActive = ref(false)
 const dualPageFlipDir = ref<'next' | 'prev'>('next')
 const dualPageFlipKey = ref(0)
-const dualPageFlipDuration = ref(360)
+const dualPageFlipDuration = ref(420)
+const dualCurlProgress = ref(0)
 const dualFlipSnapshot = ref<{
   underLeft: string
   underRight: string
   leafFront: string
   leafBack: string
 } | null>(null)
-let dualPageFlipTimer: number | null = null
+let dualPageFlipRaf: number | null = null
+
+function cancelDualPageFlipAnimation() {
+  if (dualPageFlipRaf !== null) {
+    window.cancelAnimationFrame(dualPageFlipRaf)
+    dualPageFlipRaf = null
+  }
+}
+
+const dualCurlStyles = computed(() => {
+  const raw = Math.min(1, Math.max(0, dualCurlProgress.value))
+  // 手指掀页起势轻快、跨中缝平顺、落页轻柔缓停
+  const t = 1 - Math.pow(1 - raw, 2.25)
+  const arch = Math.sin(t * Math.PI)
+  const tilt = arch * 5.2
+  const foldWidthPct = 2.8 + arch * 12.5
+  const foldOpacity = Math.min(1, raw * 9, (1 - raw) * 9)
+  const clampPct = (v: number) => Math.min(100, Math.max(0, v))
+
+  if (dualPageFlipDir.value === 'next') {
+    const spineX = 100 * (1 - t)
+    const topX = clampPct(spineX + tilt)
+    const botX = clampPct(spineX - tilt)
+    const peelTop = clampPct((topX - 50) * 2)
+    const peelBot = clampPct((botX - 50) * 2)
+    const landTop = clampPct(topX * 2)
+    const landBot = clampPct(botX * 2)
+    const tiltDeg = (arch * 3.4).toFixed(2)
+    return {
+      peelClip: `polygon(0% 0%, ${peelTop.toFixed(2)}% 0%, ${peelBot.toFixed(2)}% 100%, 0% 100%)`,
+      landClip: `polygon(${landTop.toFixed(2)}% 0%, 100% 0%, 100% 100%, ${landBot.toFixed(2)}% 100%)`,
+      foldStyle: {
+        left: `${spineX.toFixed(2)}%`,
+        width: `${foldWidthPct.toFixed(2)}%`,
+        opacity: foldOpacity.toFixed(3),
+        background: theme.value.body,
+        transform: `translateX(-28%) rotate(${tiltDeg}deg)`,
+      },
+    }
+  }
+
+  const spineX = 100 * t
+  const topX = clampPct(spineX - tilt)
+  const botX = clampPct(spineX + tilt)
+  const peelTop = clampPct(topX * 2)
+  const peelBot = clampPct(botX * 2)
+  const landTop = clampPct((topX - 50) * 2)
+  const landBot = clampPct((botX - 50) * 2)
+  const tiltDeg = (-arch * 3.4).toFixed(2)
+  return {
+    peelClip: `polygon(${peelTop.toFixed(2)}% 0%, 100% 0%, 100% 100%, ${peelBot.toFixed(2)}% 100%)`,
+    landClip: `polygon(0% 0%, ${landTop.toFixed(2)}% 0%, ${landBot.toFixed(2)}% 100%, 0% 100%)`,
+    foldStyle: {
+      left: `${spineX.toFixed(2)}%`,
+      width: `${foldWidthPct.toFixed(2)}%`,
+      opacity: foldOpacity.toFixed(3),
+      background: theme.value.body,
+      transform: `translateX(-72%) rotate(${tiltDeg}deg)`,
+    },
+  }
+})
 
 watch(horizontalPageIndex, (next, prev) => {
   if (!isDualPageActive.value || horizontalJumpInProgress.value || next === prev) return
@@ -1819,19 +1902,31 @@ watch(horizontalPageIndex, (next, prev) => {
   const newLeft = pages[newStart] || ''
   const newRight = pages[newStart + 1] || ''
   const isNext = newStart > oldStart
+  cancelDualPageFlipAnimation()
   dualPageFlipDir.value = isNext ? 'next' : 'prev'
   dualFlipSnapshot.value = isNext
     ? { underLeft: oldLeft, underRight: newRight, leafFront: oldRight, leafBack: newLeft }
     : { underLeft: newLeft, underRight: oldRight, leafFront: oldLeft, leafBack: newRight }
-  dualPageFlipDuration.value = Math.max(180, Math.min(1200, Math.round(duration)))
+  const durationMs = Math.max(220, Math.min(1200, Math.round(duration)))
+  dualPageFlipDuration.value = durationMs
+  dualCurlProgress.value = 0
   dualPageFlipKey.value += 1
   dualPageFlipActive.value = true
-  if (dualPageFlipTimer !== null) window.clearTimeout(dualPageFlipTimer)
-  dualPageFlipTimer = window.setTimeout(() => {
-    dualPageFlipTimer = null
-    dualPageFlipActive.value = false
-    dualFlipSnapshot.value = null
-  }, dualPageFlipDuration.value + 30)
+
+  const startTime = performance.now()
+  const step = (now: number) => {
+    const progress = Math.min(1, (now - startTime) / durationMs)
+    dualCurlProgress.value = progress
+    if (progress < 1) {
+      dualPageFlipRaf = window.requestAnimationFrame(step)
+    } else {
+      dualPageFlipRaf = null
+      dualPageFlipActive.value = false
+      dualFlipSnapshot.value = null
+      dualCurlProgress.value = 0
+    }
+  }
+  dualPageFlipRaf = window.requestAnimationFrame(step)
 })
 
 /** 把某个搜索命中的高亮定位到视野内 —— 左右分页下就是"换到它所在的那一页"。
@@ -4224,6 +4319,7 @@ onUnmounted(() => {
   // 离开阅读器: PDF 文档不再需要, 释放它占的内存
   if (store.book?.bookUrl) void releasePdfBook(store.book.bookUrl)
   cancelPageScrollAnimation(scrollContainerRef.value)
+  cancelDualPageFlipAnimation()
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('wheel', handleReaderWheel)
   window.removeEventListener('mousedown', handleReaderMouseDown, true)
@@ -4846,12 +4942,11 @@ watch(
   position: absolute;
   inset: 0;
   z-index: 8;
-  perspective: 2200px;
   pointer-events: none;
   overflow: hidden;
 }
 
-.dual-book-under {
+.dual-curl-page {
   position: absolute;
   top: 0;
   bottom: 0;
@@ -4859,108 +4954,94 @@ watch(
   padding: var(--reader-page-vertical-padding) var(--reader-side-padding);
   box-sizing: border-box;
   overflow: hidden;
+  will-change: clip-path;
 }
 
-.dual-book-under.is-left {
+.dual-curl-page.is-left {
   left: 0;
 }
 
-.dual-book-under.is-right {
+.dual-curl-page.is-right {
   left: 50%;
 }
 
-.dual-book-leaf {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 50%;
-  transform-style: preserve-3d;
-  will-change: transform;
+.dual-curl-peeling {
   z-index: 2;
 }
 
-.dual-book-leaf.is-next {
-  left: 50%;
-  transform-origin: left center;
-  animation: dualBookFlipNext var(--dual-flip-duration, 360ms) cubic-bezier(0.24, 0.58, 0.32, 1) forwards;
+.dual-curl-landing {
+  z-index: 3;
 }
 
-.dual-book-leaf.is-prev {
-  left: 0;
-  transform-origin: right center;
-  animation: dualBookFlipPrev var(--dual-flip-duration, 360ms) cubic-bezier(0.24, 0.58, 0.32, 1) forwards;
-}
-
-.dual-book-leaf-face {
+/* 仿真卷页的纸背弧面光影与投射阴影 */
+.dual-curl-fold {
   position: absolute;
-  inset: 0;
-  padding: var(--reader-page-vertical-padding) var(--reader-side-padding);
-  box-sizing: border-box;
-  overflow: hidden;
-  backface-visibility: hidden;
-  -webkit-backface-visibility: hidden;
+  top: -8%;
+  bottom: -8%;
+  z-index: 5;
+  pointer-events: none;
+  will-change: left, width, transform, opacity;
+  border-radius: 2px;
 }
 
-.dual-book-leaf-face.is-front::after,
-.dual-book-leaf-face.is-back::after {
+.dual-curl-fold::before {
   content: '';
   position: absolute;
   inset: 0;
   pointer-events: none;
 }
 
-.dual-book-leaf.is-next .dual-book-leaf-face.is-front::after {
-  background: linear-gradient(90deg, rgba(0, 0, 0, 0.16) 0%, transparent 18%, rgba(0, 0, 0, 0.08) 100%);
+.dual-curl-fold::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 44px;
+  pointer-events: none;
 }
 
-.dual-book-leaf.is-next .dual-book-leaf-face.is-back {
-  transform: rotateY(180deg);
+.dual-curl-fold.is-next {
+  box-shadow:
+    -10px 0 22px rgba(0, 0, 0, 0.14),
+    14px 0 32px rgba(0, 0, 0, 0.24);
 }
 
-.dual-book-leaf.is-next .dual-book-leaf-face.is-back::after {
-  background: linear-gradient(270deg, rgba(0, 0, 0, 0.16) 0%, transparent 18%, rgba(0, 0, 0, 0.08) 100%);
+.dual-curl-fold.is-next::before {
+  background: linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0.22) 0%,
+    rgba(255, 255, 255, 0.34) 22%,
+    rgba(255, 255, 255, 0.14) 48%,
+    rgba(0, 0, 0, 0.08) 76%,
+    rgba(0, 0, 0, 0.28) 100%
+  );
 }
 
-.dual-book-leaf.is-prev .dual-book-leaf-face.is-front::after {
-  background: linear-gradient(270deg, rgba(0, 0, 0, 0.16) 0%, transparent 18%, rgba(0, 0, 0, 0.08) 100%);
+.dual-curl-fold.is-next::after {
+  left: 100%;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0.07) 42%, transparent 100%);
 }
 
-.dual-book-leaf.is-prev .dual-book-leaf-face.is-back {
-  transform: rotateY(-180deg);
+.dual-curl-fold.is-prev {
+  box-shadow:
+    10px 0 22px rgba(0, 0, 0, 0.14),
+    -14px 0 32px rgba(0, 0, 0, 0.24);
 }
 
-.dual-book-leaf.is-prev .dual-book-leaf-face.is-back::after {
-  background: linear-gradient(90deg, rgba(0, 0, 0, 0.16) 0%, transparent 18%, rgba(0, 0, 0, 0.08) 100%);
+.dual-curl-fold.is-prev::before {
+  background: linear-gradient(
+    270deg,
+    rgba(0, 0, 0, 0.22) 0%,
+    rgba(255, 255, 255, 0.34) 22%,
+    rgba(255, 255, 255, 0.14) 48%,
+    rgba(0, 0, 0, 0.08) 76%,
+    rgba(0, 0, 0, 0.28) 100%
+  );
 }
 
-@keyframes dualBookFlipNext {
-  0% {
-    transform: rotateY(0deg);
-    box-shadow: -4px 0 18px rgba(0, 0, 0, 0.16);
-  }
-  50% {
-    transform: rotateY(-90deg);
-    box-shadow: -16px 0 36px rgba(0, 0, 0, 0.34);
-  }
-  100% {
-    transform: rotateY(-180deg);
-    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.12);
-  }
-}
-
-@keyframes dualBookFlipPrev {
-  0% {
-    transform: rotateY(0deg);
-    box-shadow: 4px 0 18px rgba(0, 0, 0, 0.16);
-  }
-  50% {
-    transform: rotateY(90deg);
-    box-shadow: 16px 0 36px rgba(0, 0, 0, 0.34);
-  }
-  100% {
-    transform: rotateY(180deg);
-    box-shadow: -4px 0 16px rgba(0, 0, 0, 0.12);
-  }
+.dual-curl-fold.is-prev::after {
+  right: 100%;
+  background: linear-gradient(270deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0.07) 42%, transparent 100%);
 }
 
 .horizontal-pages.page-selection-hidden .horizontal-page,
@@ -5313,6 +5394,11 @@ watch(
  * 目录、书架等窄面板保持原宽度。 */
 .reader-drawer.drawer-wide {
   width: min(520px, 94vw);
+}
+
+/* 换源面板复用搜索结果的四栏联动视图，需要更宽的抽屉宽度。 */
+.reader-drawer.drawer-source-wide {
+  width: min(1240px, 95vw);
 }
 
 .selection-menu {
