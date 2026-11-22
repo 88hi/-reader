@@ -3,7 +3,6 @@
     ref="resultsContainerRef"
     class="search-results"
     :class="{ 'is-switch-mode': isSwitchMode }"
-    @scroll="handleResultsScroll"
   >
     <div class="search-header">
       <div class="search-header-main">
@@ -136,7 +135,7 @@
             type="button"
             class="sidebar-source-item"
             :class="{ active: activeResultSourceUrl === '' }"
-            @click="activeResultSourceUrl = ''"
+            @click="selectResultSource('')"
           >
             <span class="sidebar-source-name">全部书源</span>
             <span class="sidebar-source-count">{{ rankedResults.length }}</span>
@@ -148,7 +147,7 @@
             class="sidebar-source-item"
             :class="{ active: activeResultSourceUrl === item.origin }"
             :title="`${item.name}（右键管理书源）`"
-            @click="activeResultSourceUrl = item.origin"
+            @click="selectResultSource(item.origin)"
             @contextmenu.prevent="handleSourceContextMenu(item, $event)"
           >
             <span class="sidebar-source-name">{{ item.name }}</span>
@@ -157,8 +156,13 @@
         </div>
       </aside>
 
-      <!-- 第二列：单列长条书籍列表 -->
-      <div class="search-books-pane" :class="{ 'is-split': Boolean(previewBook) }">
+      <!-- 第二列：单列长条书籍列表（独立滚动 + 分批渲染，避免书多时切换书源卡顿） -->
+      <div
+        ref="booksPaneRef"
+        class="search-books-pane"
+        :class="{ 'is-split': Boolean(previewBook) }"
+        @scroll="handleResultsScroll"
+      >
         <div v-if="isSearching && rankedResults.length === 0" class="books-empty-state">
           <span class="dot-pulse"></span>
           <span>{{ searchProgressText }}</span>
@@ -168,7 +172,7 @@
         </div>
         <div v-else class="search-book-list" role="list">
           <div
-            v-for="book in displayedResults"
+            v-for="book in renderedResults"
             :key="`${book.origin}::${book.bookUrl}`"
             class="search-book-row"
             :class="{
@@ -242,6 +246,14 @@
               </template>
             </div>
           </div>
+          <button
+            v-if="renderedResults.length < displayedResults.length"
+            type="button"
+            class="books-load-more-btn"
+            @click="showMoreRenderedBooks"
+          >
+            显示更多（已显示 {{ renderedResults.length }} / {{ displayedResults.length }} 本）
+          </button>
         </div>
       </div>
 
@@ -317,6 +329,64 @@
       v-model="showBookDetail"
       :book="selectedBook"
     />
+
+    <!-- 右键书源「移动分组」弹窗 -->
+    <Teleport to="body">
+      <div
+        v-if="moveGroupTarget"
+        class="move-group-overlay"
+        @click.self="closeMoveGroupModal"
+      >
+        <div class="move-group-dialog" role="dialog" aria-modal="true" aria-label="移动书源分组">
+          <div class="move-group-header">
+            <h3>移动书源分组</h3>
+            <button type="button" class="toc-mini-btn" @click="closeMoveGroupModal">✕</button>
+          </div>
+          <div class="move-group-source-info">
+            <span class="move-group-source-name">{{ moveGroupTarget.name }}</span>
+            <span class="move-group-source-current">
+              当前分组：{{ moveGroupTarget.currentGroup || '未分组' }}
+            </span>
+          </div>
+          <div class="move-group-field">
+            <label for="move-group-input">目标分组（留空表示移出分组）</label>
+            <input
+              id="move-group-input"
+              v-model="moveGroupInput"
+              type="text"
+              class="move-group-input"
+              placeholder="输入分组名或点击下方已有分组..."
+              @keydown.enter.prevent="confirmMoveSourceGroup"
+            />
+          </div>
+          <div class="move-group-chips">
+            <button
+              type="button"
+              class="move-group-chip"
+              :class="{ active: moveGroupInput.trim() === '' }"
+              @click="moveGroupInput = ''"
+            >未分组</button>
+            <button
+              v-for="group in sourceGroups"
+              :key="group"
+              type="button"
+              class="move-group-chip"
+              :class="{ active: moveGroupInput.trim() === group }"
+              @click="moveGroupInput = group"
+            >{{ group }}</button>
+          </div>
+          <div class="move-group-footer">
+            <button type="button" class="back-btn" @click="closeMoveGroupModal">取消</button>
+            <button
+              type="button"
+              class="back-btn primary"
+              :disabled="moveGroupSaving"
+              @click="confirmMoveSourceGroup"
+            >{{ moveGroupSaving ? '保存中…' : '确定移动' }}</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -519,6 +589,7 @@ const searchSessionCache = getSearchSessionCache()
 /** 本次结果是不是直接来自缓存（决定要不要提示「已显示上次结果」）。 */
 const resultsFromCache = ref(false)
 const resultsContainerRef = ref<HTMLElement | null>(null)
+const booksPaneRef = ref<HTMLElement | null>(null)
 const showBookDetail = ref(false)
 const selectedBook = ref<Book | SearchBook | null>(null)
 
@@ -571,20 +642,32 @@ const enabledSourceSignature = computed(() => {
 
 /** 全部命中结果(已完成按书源可用性与相关度过滤排序)。 */
 const rankedResults = computed<SearchBook[]>(() => {
-  const enriched = results.value
-    .filter((book) => enabledSourceUrls.value.has(book.origin))
-    .map((book) => {
-      const source = sourceByUrl.value.get(book.origin)
-      return {
+  const enriched: SearchBook[] = []
+  for (const book of results.value) {
+    const validCandidates = book.sourceCandidates?.filter((candidate) => (
+      enabledSourceUrls.value.has(candidate.origin)
+    ))
+    const validUrls = book.bookSourceUrls?.filter((url) => enabledSourceUrls.value.has(url))
+    let activeBook: SearchBook | null = null
+    if (enabledSourceUrls.value.has(book.origin)) {
+      activeBook = book
+    } else if (validCandidates && validCandidates.length > 0) {
+      // 原主书源被禁用/删除时，自动提升剩余可用候选书源，无需重新搜索
+      activeBook = {
         ...book,
-        bookSourceUrls: book.bookSourceUrls?.filter((url) => enabledSourceUrls.value.has(url)),
-        sourceCandidates: book.sourceCandidates?.filter((candidate) => (
-          enabledSourceUrls.value.has(candidate.origin)
-        )),
-        originName: book.originName || source?.bookSourceName || book.origin,
-        originGroup: book.originGroup || source?.bookSourceGroup,
+        ...validCandidates[0],
       }
+    }
+    if (!activeBook) continue
+    const source = sourceByUrl.value.get(activeBook.origin)
+    enriched.push({
+      ...activeBook,
+      bookSourceUrls: validUrls,
+      sourceCandidates: validCandidates,
+      originName: activeBook.originName || source?.bookSourceName || activeBook.origin,
+      originGroup: source?.bookSourceGroup ?? activeBook.originGroup,
     })
+  }
   return rankSearchResults(enriched, searchKey.value)
 })
 
@@ -595,6 +678,9 @@ type ResultSourceSummary = {
 }
 
 const activeResultSourceUrl = ref('')
+const INITIAL_VISIBLE_BOOKS = 60
+const VISIBLE_BOOKS_STEP = 60
+const visibleBookLimit = ref(INITIAL_VISIBLE_BOOKS)
 
 const resultSourceSummaries = computed<ResultSourceSummary[]>(() => {
   const counts = new Map<string, number>()
@@ -623,14 +709,24 @@ const resultSourceSummaries = computed<ResultSourceSummary[]>(() => {
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hans-CN'))
 })
 
+function selectResultSource(origin: string) {
+  if (activeResultSourceUrl.value === origin) return
+  activeResultSourceUrl.value = origin
+  visibleBookLimit.value = INITIAL_VISIBLE_BOOKS
+  nextTick(() => {
+    booksPaneRef.value?.scrollTo({ top: 0 })
+  })
+}
+
 watch(resultSourceSummaries, (list) => {
   if (activeResultSourceUrl.value && !list.some((item) => item.origin === activeResultSourceUrl.value)) {
-    activeResultSourceUrl.value = ''
+    selectResultSource('')
   }
 })
 
 watch(searchKey, () => {
   activeResultSourceUrl.value = ''
+  visibleBookLimit.value = INITIAL_VISIBLE_BOOKS
 })
 
 const displayedResults = computed<SearchBook[]>(() => {
@@ -649,7 +745,7 @@ const displayedResults = computed<SearchBook[]>(() => {
         ...book,
         ...candidate,
         originName: candidate.originName || source?.bookSourceName || targetOrigin,
-        originGroup: candidate.originGroup || source?.bookSourceGroup,
+        originGroup: source?.bookSourceGroup ?? candidate.originGroup,
         bookSourceUrls: book.bookSourceUrls,
         sourceCandidates: book.sourceCandidates,
       })
@@ -662,6 +758,62 @@ const displayedResults = computed<SearchBook[]>(() => {
   return matched
 })
 
+const renderedResults = computed<SearchBook[]>(() => {
+  return displayedResults.value.slice(0, visibleBookLimit.value)
+})
+
+function showMoreRenderedBooks() {
+  visibleBookLimit.value += VISIBLE_BOOKS_STEP
+}
+
+const moveGroupTarget = ref<{ origin: string; name: string; currentGroup: string } | null>(null)
+const moveGroupInput = ref('')
+const moveGroupSaving = ref(false)
+
+function openMoveGroupModal(item: ResultSourceSummary) {
+  const source = sourceByUrl.value.get(item.origin)
+  if (!source) return
+  const currentGroup = (source.bookSourceGroup || '').trim()
+  moveGroupTarget.value = {
+    origin: item.origin,
+    name: item.name,
+    currentGroup,
+  }
+  moveGroupInput.value = currentGroup
+}
+
+function closeMoveGroupModal() {
+  if (moveGroupSaving.value) return
+  moveGroupTarget.value = null
+  moveGroupInput.value = ''
+}
+
+async function confirmMoveSourceGroup() {
+  const target = moveGroupTarget.value
+  if (!target || moveGroupSaving.value) return
+  const source = sourceByUrl.value.get(target.origin)
+  if (!source) {
+    closeMoveGroupModal()
+    return
+  }
+  const nextGroup = moveGroupInput.value.trim()
+  moveGroupSaving.value = true
+  try {
+    await saveBookSource({ ...source, bookSourceGroup: nextGroup })
+    await sourceStore.fetchSources(true)
+    appStore.showToast(
+      `已将「${target.name}」移动到「${nextGroup || '未分组'}」`,
+      'success',
+    )
+    moveGroupTarget.value = null
+    moveGroupInput.value = ''
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '移动分组失败', 'error')
+  } finally {
+    moveGroupSaving.value = false
+  }
+}
+
 function handleSourceContextMenu(item: ResultSourceSummary, event: MouseEvent) {
   const source = sourceByUrl.value.get(item.origin)
   showContextMenu(event, [
@@ -670,11 +822,18 @@ function handleSourceContextMenu(item: ResultSourceSummary, event: MouseEvent) {
       action: async () => {
         try {
           await pinBookSource(item.origin)
-          await sourceStore.fetchSources()
+          await sourceStore.fetchSources(true)
           appStore.showToast(`已置顶「${item.name}」`, 'success')
         } catch (e: unknown) {
           appStore.showToast((e as Error).message || '置顶书源失败', 'error')
         }
+      },
+    },
+    {
+      label: '移动到分组…',
+      disabled: !source,
+      action: () => {
+        openMoveGroupModal(item)
       },
     },
     {
@@ -684,7 +843,7 @@ function handleSourceContextMenu(item: ResultSourceSummary, event: MouseEvent) {
         if (!source) return
         try {
           await saveBookSource({ ...source, enabled: false })
-          await sourceStore.fetchSources()
+          await sourceStore.fetchSources(true)
           appStore.showToast(`已禁用「${item.name}」`, 'success')
         } catch (e: unknown) {
           appStore.showToast((e as Error).message || '禁用书源失败', 'error')
@@ -697,10 +856,10 @@ function handleSourceContextMenu(item: ResultSourceSummary, event: MouseEvent) {
         appStore.showSourceManager = true
       },
     },
+    { divider: true },
     {
       label: '删除此书源',
       danger: true,
-      divider: true,
       action: async () => {
         const ok = await appStore.confirmDialog(`确定删除书源「${item.name}」？此操作不可撤销。`, {
           title: '删除书源',
@@ -709,7 +868,7 @@ function handleSourceContextMenu(item: ResultSourceSummary, event: MouseEvent) {
         if (!ok) return
         try {
           await deleteBookSource(item.origin)
-          await sourceStore.fetchSources()
+          await sourceStore.fetchSources(true)
           appStore.showToast(`已删除「${item.name}」`, 'success')
         } catch (e: unknown) {
           appStore.showToast((e as Error).message || '删除书源失败', 'error')
@@ -890,12 +1049,18 @@ function continueSearchFrom(startIndex: number) {
   streamSearch(key, sessionKey, startIndex, searchPage.value)
 }
 
-/** 滚动接近底部时自动续拉，行为对齐 legado 的滚动加载。 */
+/** 滚动接近底部时先扩展本地渲染批次，已全部展示后再自动续拉后端下一页。 */
 function handleResultsScroll() {
-  const el = resultsContainerRef.value
-  if (!el || isSearching.value) return
+  const el = booksPaneRef.value || resultsContainerRef.value
+  if (!el) return
   const { scrollTop, scrollHeight, clientHeight } = el
-  if (scrollTop + clientHeight >= scrollHeight - 160) loadMore()
+  if (scrollTop + clientHeight >= scrollHeight - 240) {
+    if (visibleBookLimit.value < displayedResults.value.length) {
+      visibleBookLimit.value += VISIBLE_BOOKS_STEP
+      return
+    }
+    if (!isSearching.value) loadMore()
+  }
 }
 
 function closeEventSource() {
@@ -1284,6 +1449,9 @@ watch([searchScope, sourceGroups, sourceOptions], () => {
 let mountedSourceSignature = ''
 
 watch(enabledSourceSignature, (next, previous) => {
+  if (previewBook.value && !enabledSourceUrls.value.has(previewBook.value.origin)) {
+    closeBookTocPreview()
+  }
   const baseline = mountedSourceSignature
   if (!shouldResearchForSourceChange({
     hasSearchKey: Boolean(searchKey.value),
@@ -1291,13 +1459,12 @@ watch(enabledSourceSignature, (next, previous) => {
     next,
     baseline,
   })) {
-    // 首次拿到清单时把基线补上，供后续比较。
-    if (next && !previous) mountedSourceSignature = next
+    // 禁用/删除/重排书源不触发重搜，同时同步基线，以便后续重新启用时仍能识别为新增。
+    if (next) mountedSourceSignature = next
     return
   }
   mountedSourceSignature = next
-  // 书源真的增删/停启了：缓存里可能有已删源的条目，新启用的源也可能搜出更多
-  // 结果。这条不受会话缓存影响，必须重搜。
+  // 仅在新增/启用了新书源时重搜。
   doSearch(searchKey.value, true)
 })
 
@@ -1407,38 +1574,37 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 .search-results {
   height: 100%;
   min-height: 0;
-  overflow: auto;
-  padding: 0 var(--space-6) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 var(--space-6) var(--space-4);
 }
 
 .search-results.is-switch-mode {
-  display: flex;
-  flex-direction: column;
   padding: 0 var(--space-4) var(--space-4);
-  overflow: hidden;
   background: var(--color-bg);
   color: var(--color-text);
 }
 
-.search-results.is-switch-mode .search-body-layout {
+.search-results .search-body-layout {
   flex: 1;
   min-height: 0;
   align-items: stretch;
   overflow: hidden;
 }
 
-.search-results.is-switch-mode .search-sources-sidebar,
-.search-results.is-switch-mode .search-toc-pane,
-.search-results.is-switch-mode .search-content-pane {
+.search-results .search-sources-sidebar,
+.search-results .search-toc-pane,
+.search-results .search-content-pane {
   position: static;
   max-height: none;
   height: 100%;
 }
 
-.search-results.is-switch-mode .search-books-pane {
+.search-results .search-books-pane {
   height: 100%;
   overflow-y: auto;
-  padding-right: 2px;
+  padding-right: 4px;
 }
 
 .search-header {
@@ -2112,5 +2278,146 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
     width: 100%;
     min-width: 0;
   }
+}
+
+.books-load-more-btn {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--duration-fast), color var(--duration-fast), border-color var(--duration-fast);
+}
+
+.books-load-more-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-primary);
+  border-color: var(--color-primary-border);
+}
+
+.move-group-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-toast) + 30);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+}
+
+.move-group-dialog {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-xl);
+}
+
+.move-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.move-group-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.move-group-source-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-hover);
+}
+
+.move-group-source-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.move-group-source-current {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.move-group-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.move-group-field label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.move-group-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.move-group-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.move-group-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.move-group-chip {
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+
+.move-group-chip:hover {
+  border-color: var(--color-primary-border);
+  color: var(--color-text);
+}
+
+.move-group-chip.active {
+  background: var(--color-primary-soft-bg);
+  border-color: var(--color-primary);
+  color: var(--color-primary-soft-text);
+  font-weight: 600;
+}
+
+.move-group-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
 }
 </style>

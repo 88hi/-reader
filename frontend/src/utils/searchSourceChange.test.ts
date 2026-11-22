@@ -42,13 +42,22 @@ describe('shouldResearchForSourceChange', () => {
     })).toBe(true)
   })
 
-  it('re-searches when a source is removed or disabled', () => {
+  it('does not re-search when a source is removed or disabled', () => {
     expect(shouldResearchForSourceChange({
       hasSearchKey: true,
       previous: 'https://a.com\nhttps://b.com',
       next: 'https://a.com',
       baseline: 'https://a.com\nhttps://b.com',
-    })).toBe(true)
+    })).toBe(false)
+  })
+
+  it('does not re-search when sources are only reordered (e.g. pinned)', () => {
+    expect(shouldResearchForSourceChange({
+      hasSearchKey: true,
+      previous: 'https://a.com\nhttps://b.com',
+      next: 'https://b.com\nhttps://a.com',
+      baseline: 'https://a.com\nhttps://b.com',
+    })).toBe(false)
   })
 
   it('never re-searches without an active keyword', () => {

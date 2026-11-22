@@ -19,5 +19,9 @@ export function shouldResearchForSourceChange(params: {
   if (params.next === params.previous) return false
   // 回到基线意味着只是重新拉了一遍同样的书源。
   if (params.next === params.baseline) return false
-  return true
+  // 禁用、删除、置顶重排书源时，前端 rankedResults 会直接响应式过滤掉已禁用/删除的书源，
+  // 无需推倒重来发起新一轮搜索；仅当新增/重新启用了之前不在清单里的书源时才需要重搜。
+  const prevSet = new Set(params.previous.split('\n').filter(Boolean))
+  const nextUrls = params.next.split('\n').filter(Boolean)
+  return nextUrls.some((url) => !prevSet.has(url))
 }
