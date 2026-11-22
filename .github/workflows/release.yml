@@ -90,6 +90,11 @@ jobs:
         with:
           targets: ${{ matrix.rust_targets }}
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-release-${{ matrix.platform }}-${{ matrix.arch }}-${{ matrix.target }}
+
       - name: Verify release metadata
         env:
           RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_tag }}
