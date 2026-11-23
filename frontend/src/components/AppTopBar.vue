@@ -22,7 +22,7 @@
             type="text"
             placeholder="搜索书籍..."
             @focus="searchFocused = true"
-            @blur="searchFocused = false"
+            @blur="handleSearchBlur"
           />
           <button v-if="searchValue" class="search-clear" type="button" @click="clearSearch">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -41,6 +41,39 @@
               <path d="m21 21-4.3-4.3" />
             </svg>
           </button>
+
+          <!-- 搜索记录下拉 -->
+          <div
+            v-if="searchFocused && searchHistory.length > 0"
+            class="search-history-dropdown"
+            @mousedown.prevent
+          >
+            <div class="search-history-header">
+              <span>搜索记录</span>
+              <button
+                type="button"
+                class="search-history-clear-all"
+                @click="clearAllSearchHistory"
+              >清空记录</button>
+            </div>
+            <div class="search-history-list">
+              <div
+                v-for="item in searchHistory"
+                :key="item"
+                class="search-history-item"
+                @click="selectHistoryKeyword(item)"
+              >
+                <span class="search-history-text" :title="item">{{ item }}</span>
+                <button
+                  type="button"
+                  class="search-history-remove"
+                  title="删除记录"
+                  aria-label="删除记录"
+                  @click.stop="removeSearchHistoryItem(item)"
+                >×</button>
+              </div>
+            </div>
+          </div>
         </form>
       </div>
 
@@ -101,6 +134,29 @@ import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useExploreStore } from '../stores/explore'
 
+const SEARCH_HISTORY_KEY = 'reader-search-history'
+const MAX_SEARCH_HISTORY = 15
+
+function loadSearchHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(SEARCH_HISTORY_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, MAX_SEARCH_HISTORY)
+  } catch {
+    return []
+  }
+}
+
+function saveSearchHistory(list: string[]) {
+  try {
+    localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(list.slice(0, MAX_SEARCH_HISTORY)))
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
+
 const router = useRouter()
 const route = useRoute()
 const appStore = useAppStore()
@@ -109,6 +165,7 @@ const exploreStore = useExploreStore()
 
 const searchFocused = ref(false)
 const searchValue = ref('')
+const searchHistory = ref<string[]>(loadSearchHistory())
 
 const theme = computed(() => appStore.theme)
 const hasVersionUpdateReminder = computed(() => appStore.hasVersionUpdateReminder)
@@ -125,6 +182,33 @@ const showGlobalSearch = computed(() => {
 })
 const canSearch = computed(() => searchValue.value.trim().length > 0)
 
+function recordSearchKeyword(keyword: string) {
+  const next = [keyword, ...searchHistory.value.filter((item) => item !== keyword)].slice(0, MAX_SEARCH_HISTORY)
+  searchHistory.value = next
+  saveSearchHistory(next)
+}
+
+function removeSearchHistoryItem(keyword: string) {
+  const next = searchHistory.value.filter((item) => item !== keyword)
+  searchHistory.value = next
+  saveSearchHistory(next)
+}
+
+function clearAllSearchHistory() {
+  searchHistory.value = []
+  saveSearchHistory([])
+}
+
+function selectHistoryKeyword(keyword: string) {
+  searchValue.value = keyword
+  searchFocused.value = false
+  handleSearch()
+}
+
+function handleSearchBlur() {
+  searchFocused.value = false
+}
+
 function goHome() {
   shelfStore.clearSearch()
   router.replace('/')
@@ -134,10 +218,18 @@ function handleSearch() {
   const value = searchValue.value.trim()
   if (!value) return
 
-  shelfStore.startSearch(value, {
-    scope: 'all',
-    sourceUrl: route.path === '/explore' ? exploreStore.activeSourceUrl : '',
-  })
+  recordSearchKeyword(value)
+  searchFocused.value = false
+
+  // 在书海页带入当前发现书源，否则沿用上次记住的搜索范围与书源/分组选择
+  if (route.path === '/explore' && exploreStore.activeSourceUrl) {
+    shelfStore.startSearch(value, {
+      scope: 'source',
+      sourceUrl: exploreStore.activeSourceUrl,
+    })
+  } else {
+    shelfStore.startSearch(value)
+  }
 
   if (route.path !== '/') {
     router.push('/')
@@ -216,6 +308,7 @@ function openSourceManager() {
 }
 
 .search-box {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -233,6 +326,96 @@ function openSourceManager() {
   border-color: var(--color-primary);
   background: var(--color-bg-elevated);
   box-shadow: var(--focus-ring);
+}
+
+.search-history-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: calc(var(--z-sticky) + 10);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-xl);
+  overflow: hidden;
+}
+
+.search-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.search-history-clear-all {
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.search-history-clear-all:hover {
+  color: var(--color-danger);
+  background: var(--color-bg-hover);
+}
+
+.search-history-list {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.search-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background var(--duration-fast);
+}
+
+.search-history-item:hover {
+  background: var(--color-bg-hover);
+}
+
+.search-history-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-history-remove {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.search-history-remove:hover {
+  background: color-mix(in srgb, var(--color-danger) 14%, transparent);
+  color: var(--color-danger);
 }
 
 .search-icon {

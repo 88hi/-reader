@@ -25,7 +25,7 @@
             {{ searchProgressText }}
           </span>
           <span v-else class="result-count">
-            ({{ expandedAllSourceResults.length }} 个结果<template v-if="searchProgress.totalSources > 0"> · 已扫 {{ searchProgress.totalSources }} 个书源</template>)
+            ({{ rankedResults.length }} 个结果<template v-if="searchProgress.totalSources > 0"> · 已扫 {{ searchProgress.totalSources }} 个书源</template>)
           </span>
           <!-- 结果来自会话缓存时标一下；点它可重搜。 -->
           <button
@@ -138,7 +138,7 @@
             @click="selectResultSource('')"
           >
             <span class="sidebar-source-name">全部书源</span>
-            <span class="sidebar-source-count">{{ expandedAllSourceResults.length }}</span>
+            <span class="sidebar-source-count">{{ rankedResults.length }}</span>
           </button>
           <button
             v-for="item in resultSourceSummaries"
@@ -156,11 +156,11 @@
         </div>
       </aside>
 
-      <!-- 第二列：单列长条书籍列表（独立滚动 + 分批渲染，避免书多时切换书源卡顿） -->
+      <!-- 第二列：单列紧凑长条书籍列表（独立滚动 + 分批渲染） -->
       <div
         ref="booksPaneRef"
         class="search-books-pane"
-        :class="{ 'is-split': Boolean(previewBook) }"
+        :class="{ 'is-split': Boolean(previewBook || sameSourceBook) }"
         @scroll="handleResultsScroll"
       >
         <div v-if="isSearching && rankedResults.length === 0" class="books-empty-state">
@@ -176,7 +176,7 @@
             :key="`${book.origin}::${book.bookUrl}`"
             class="search-book-row"
             :class="{
-              active: isPreviewBook(book),
+              active: isPreviewBook(book) || isSameSourceBook(book),
               current: isCurrentSourceBook(book),
             }"
             role="listitem"
@@ -205,15 +205,6 @@
                 <span class="search-book-author">{{ book.author || '未知作者' }}</span>
                 <span class="search-book-chip source" :title="book.originName || book.origin">
                   {{ book.originName || book.origin }}
-                </span>
-                <span v-if="book.originGroup" class="search-book-chip group" :title="book.originGroup">
-                  {{ book.originGroup }}
-                </span>
-                <span
-                  v-if="book.sourceCandidates && book.sourceCandidates.length > 1"
-                  class="search-book-chip multi"
-                >
-                  {{ book.sourceCandidates.length }} 源
                 </span>
               </div>
               <div v-if="book.lastChapter" class="search-book-latest" :title="book.lastChapter">
@@ -244,6 +235,15 @@
                   {{ isInShelf(book) ? '已加入' : '+ 书架' }}
                 </button>
               </template>
+              <button
+                type="button"
+                class="row-action-btn same-source-btn"
+                :class="{ active: isSameSourceBook(book) }"
+                :title="`查看《${book.name}》同源书源列表`"
+                @click="toggleSameSourcesPane(book)"
+              >
+                同源<template v-if="sameSourceCount(book) > 1"> ({{ sameSourceCount(book) }})</template>
+              </button>
             </div>
           </div>
           <button
@@ -256,6 +256,54 @@
           </button>
         </div>
       </div>
+
+      <!-- 同源书源列表面板：点击书籍卡片的「同源」按键后在右侧展开 -->
+      <aside v-if="sameSourceBook" class="search-same-source-pane" aria-label="同源书源列表">
+        <div class="sidebar-header">
+          <span class="toc-pane-title" :title="sameSourceBook.name">
+            同源 ({{ sameSourceCandidates.length }})
+          </span>
+          <button type="button" class="toc-mini-btn" title="关闭同源列表" @click="closeSameSourcesPane">✕</button>
+        </div>
+        <div class="sidebar-source-list">
+          <div
+            v-for="cand in sameSourceCandidates"
+            :key="`${cand.origin}::${cand.bookUrl}`"
+            class="same-source-item"
+            :class="{
+              active: isPreviewBook(cand),
+              current: isCurrentSourceBook(cand),
+            }"
+            @click="openBookTocPreview(cand)"
+            @contextmenu.prevent="handleSourceContextMenu({ origin: cand.origin, name: cand.originName || cand.origin, count: 1 }, $event)"
+          >
+            <div class="same-source-item-top">
+              <span class="same-source-item-name" :title="cand.originName || cand.origin">
+                {{ cand.originName || cand.origin }}
+              </span>
+              <button
+                v-if="isSwitchMode"
+                type="button"
+                class="toc-mini-btn"
+                :class="{ primary: !isCurrentSourceBook(cand) }"
+                :disabled="switchLoading || isCurrentSourceBook(cand)"
+                @click.stop="handleSwitchToBook(cand)"
+              >{{ isCurrentSourceBook(cand) ? '当前' : '切换' }}</button>
+              <button
+                v-else
+                type="button"
+                class="toc-mini-btn"
+                :class="{ primary: !isInShelf(cand) }"
+                :disabled="isInShelf(cand)"
+                @click.stop="handleAddToShelf(cand)"
+              >{{ isInShelf(cand) ? '已加' : '+书架' }}</button>
+            </div>
+            <div v-if="cand.lastChapter" class="same-source-item-latest" :title="cand.lastChapter">
+              {{ cand.lastChapter }}
+            </div>
+          </div>
+        </div>
+      </aside>
 
       <!-- 第三列：点击书籍后显示目录，点击章节加载正文预览 -->
       <aside v-if="previewBook" class="search-toc-pane" aria-label="书籍目录预览">
@@ -438,13 +486,14 @@ const sourceStore = useSourceStore()
 
 const isSwitchMode = computed(() => props.mode === 'switch-source')
 
-// 换源模式使用独立局部状态，避免污染书架的搜索状态
+// 换源模式使用独立局部状态，沿用上次记住的搜索范围/分组/书源选择
+const savedSwitchPref = shelfStore.readSearchSourcePref()
 const localSearchKey = ref(props.currentBook?.name?.trim() || '')
 const localSearchResults = ref<SearchBook[]>([])
 const localIsSearching = ref(false)
-const localSearchScope = ref<'all' | 'group' | 'source'>('group')
-const localSelectedGroup = ref('')
-const localSelectedSourceUrl = ref('')
+const localSearchScope = ref<'all' | 'group' | 'source'>(savedSwitchPref.scope)
+const localSelectedGroup = ref(savedSwitchPref.group)
+const localSelectedSourceUrl = ref(savedSwitchPref.sourceUrl)
 const switchInputKey = ref(props.currentBook?.name?.trim() || '')
 const failedCoverKeys = ref<Set<string>>(new Set())
 
@@ -725,48 +774,77 @@ watch(resultSourceSummaries, (list) => {
   }
 })
 
+watch([searchScope, selectedGroup, selectedSourceUrl], ([scope, group, sourceUrl]) => {
+  shelfStore.saveSearchSourcePref({ scope, group, sourceUrl })
+})
+
 watch(searchKey, () => {
   activeResultSourceUrl.value = ''
   visibleBookLimit.value = INITIAL_VISIBLE_BOOKS
+  sameSourceBook.value = null
 })
 
-/** 展开所有命中的候选书源条目，避免选「全部书源」时同名多源被折叠成 1 条而漏显。 */
-const expandedAllSourceResults = computed<SearchBook[]>(() => {
-  const expanded: SearchBook[] = []
+const sameSourceBook = ref<SearchBook | null>(null)
+
+function sameSourceCount(book: SearchBook): number {
+  if (book.sourceCandidates?.length) return book.sourceCandidates.length
+  if (book.bookSourceUrls?.length) return book.bookSourceUrls.length
+  return 1
+}
+
+function isSameSourceBook(book: SearchBook): boolean {
+  if (!sameSourceBook.value) return false
+  return searchMergeKey(sameSourceBook.value) === searchMergeKey(book)
+}
+
+function toggleSameSourcesPane(book: SearchBook) {
+  if (isSameSourceBook(book)) {
+    sameSourceBook.value = null
+    return
+  }
+  sameSourceBook.value = book
+}
+
+function closeSameSourcesPane() {
+  sameSourceBook.value = null
+}
+
+const sameSourceCandidates = computed<SearchBook[]>(() => {
+  const target = sameSourceBook.value
+  if (!target) return []
+  // 从最新的 rankedResults 里取合并对象，确保禁用/删除/新增源后同源列表实时同步
+  const mergeKey = searchMergeKey(target)
+  const latest = rankedResults.value.find((item) => searchMergeKey(item) === mergeKey) || target
+  const list: SearchBook[] = []
   const seen = new Set<string>()
-  for (const book of rankedResults.value) {
-    if (book.sourceCandidates && book.sourceCandidates.length > 0) {
-      for (const candidate of book.sourceCandidates) {
-        const origin = candidate.origin || book.origin
-        const bookUrl = candidate.bookUrl || book.bookUrl
-        const key = `${origin}::${bookUrl}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        const source = sourceByUrl.value.get(origin)
-        expanded.push({
-          ...book,
-          ...candidate,
-          origin,
-          bookUrl,
-          originName: candidate.originName || source?.bookSourceName || origin,
-          originGroup: source?.bookSourceGroup ?? candidate.originGroup ?? book.originGroup,
-          bookSourceUrls: book.bookSourceUrls,
-          sourceCandidates: book.sourceCandidates,
-        })
-      }
-      continue
-    }
-    const key = `${book.origin}::${book.bookUrl}`
+  const candidates = latest.sourceCandidates?.length
+    ? latest.sourceCandidates
+    : [latest]
+  for (const cand of candidates) {
+    const origin = cand.origin || latest.origin
+    if (!enabledSourceUrls.value.has(origin)) continue
+    const bookUrl = cand.bookUrl || latest.bookUrl
+    const key = `${origin}::${bookUrl}`
     if (seen.has(key)) continue
     seen.add(key)
-    expanded.push(book)
+    const source = sourceByUrl.value.get(origin)
+    list.push({
+      ...latest,
+      ...cand,
+      origin,
+      bookUrl,
+      originName: cand.originName || source?.bookSourceName || origin,
+      originGroup: source?.bookSourceGroup ?? cand.originGroup ?? latest.originGroup,
+      bookSourceUrls: latest.bookSourceUrls,
+      sourceCandidates: latest.sourceCandidates,
+    })
   }
-  return expanded
+  return list
 })
 
 const displayedResults = computed<SearchBook[]>(() => {
   const targetOrigin = activeResultSourceUrl.value
-  if (!targetOrigin) return expandedAllSourceResults.value
+  if (!targetOrigin) return rankedResults.value
   const matched: SearchBook[] = []
   for (const book of rankedResults.value) {
     if (book.origin === targetOrigin) {
@@ -1885,7 +1963,7 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 }
 
 .search-sources-sidebar {
-  width: 210px;
+  width: 164px;
   flex-shrink: 0;
   position: sticky;
   top: var(--space-3);
@@ -1902,7 +1980,7 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 8px 10px;
   font-size: 12px;
   font-weight: 600;
   color: var(--color-text-secondary);
@@ -1910,7 +1988,7 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 }
 
 .sidebar-hint {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 400;
   color: var(--color-text-tertiary);
 }
@@ -1918,7 +1996,7 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 .sidebar-source-list {
   flex: 1;
   overflow-y: auto;
-  padding: 6px;
+  padding: 5px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1929,13 +2007,13 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 6px;
+  padding: 6px 8px;
   border: none;
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
   transition: background var(--duration-fast), color var(--duration-fast);
@@ -1962,7 +2040,7 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 
 .sidebar-source-count {
   flex-shrink: 0;
-  padding: 1px 7px;
+  padding: 1px 6px;
   border-radius: var(--radius-full);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -1981,8 +2059,8 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 }
 
 .search-books-pane.is-split {
-  flex: 0 0 350px;
-  width: 350px;
+  flex: 0 0 286px;
+  width: 286px;
 }
 
 .books-empty-state {
@@ -2001,15 +2079,15 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 .search-book-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .search-book-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: var(--radius-lg);
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--color-border-light);
   background: var(--color-bg-elevated);
   cursor: pointer;
@@ -2024,7 +2102,7 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 .search-book-row.active {
   border-color: var(--color-primary);
   background: var(--color-primary-soft-bg);
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--color-primary) 12%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-primary) 12%, transparent);
 }
 
 .search-book-row.current {
@@ -2032,13 +2110,13 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 }
 
 .search-book-cover {
-  width: 44px;
-  height: 62px;
+  width: 36px;
+  height: 50px;
   flex-shrink: 0;
-  border-radius: 6px;
+  border-radius: 5px;
   overflow: hidden;
   background: var(--color-bg-hover);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 .search-book-cover img {
@@ -2056,7 +2134,7 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   justify-content: center;
   background: linear-gradient(155deg, #2b4c6f 0%, #1c3148 100%);
   color: rgba(255, 255, 255, 0.9);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 700;
 }
 
@@ -2065,18 +2143,18 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
 }
 
 .search-book-title-line {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
 }
 
 .search-book-title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--color-text);
   white-space: nowrap;
@@ -2087,10 +2165,11 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 .search-book-meta-line {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: 12px;
+  flex-wrap: nowrap;
+  gap: 5px;
+  font-size: 11px;
   color: var(--color-text-secondary);
+  min-width: 0;
 }
 
 .search-book-author {
@@ -2135,7 +2214,7 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 }
 
 .search-book-latest {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--color-text-tertiary);
   white-space: nowrap;
   overflow: hidden;
@@ -2145,17 +2224,22 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 .search-book-actions {
   flex-shrink: 0;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 62px;
 }
 
 .row-action-btn {
-  padding: 5px 10px;
-  border-radius: var(--radius-md);
+  padding: 3px 7px;
+  border-radius: 5px;
   border: 1px solid var(--color-border);
   background: transparent;
   color: var(--color-text-secondary);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
+  line-height: 1.4;
+  text-align: center;
   white-space: nowrap;
   cursor: pointer;
   transition: all var(--duration-fast);
@@ -2171,6 +2255,18 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   opacity: 0.9;
 }
 
+.row-action-btn.same-source-btn:hover {
+  border-color: var(--color-primary-border);
+  color: var(--color-primary);
+  background: var(--color-bg-hover);
+}
+
+.row-action-btn.same-source-btn.active {
+  background: var(--color-primary-soft-bg);
+  border-color: var(--color-primary);
+  color: var(--color-primary-soft-text);
+}
+
 .row-action-btn.muted {
   background: color-mix(in srgb, var(--color-border) 40%, transparent);
   border-color: transparent;
@@ -2181,6 +2277,68 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 .row-action-btn:disabled {
   opacity: 0.65;
   cursor: not-allowed;
+}
+
+.search-same-source-pane {
+  flex: 0 0 216px;
+  width: 216px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.same-source-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background var(--duration-fast), border-color var(--duration-fast);
+}
+
+.same-source-item:hover {
+  background: var(--color-bg-hover);
+}
+
+.same-source-item.active {
+  background: var(--color-primary-soft-bg);
+  border-color: var(--color-primary);
+}
+
+.same-source-item.current {
+  border-color: color-mix(in srgb, var(--color-primary) 45%, var(--color-border-light));
+}
+
+.same-source-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.same-source-item-name {
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.same-source-item-latest {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .search-toc-pane {

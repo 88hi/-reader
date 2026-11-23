@@ -604,11 +604,14 @@ const readerBackgroundDescription = computed(() => {
 })
 const proxyDescription = computed(() => {
   if (proxyModeDraft.value === 'manual') {
-    return '书源、订阅源、封面和未单独配置代理的语音请求会使用此地址。'
+    if (appStore.networkProxyStatus?.mode === 'manual' && appStore.networkProxyStatus.active && appStore.networkProxyStatus.address) {
+      return `当前已生效：${appStore.networkProxyStatus.address}（书源、订阅源、封面、独立验证窗口及未单独配置代理的语音请求均使用此代理）。`
+    }
+    return '书源、订阅源、封面、独立验证窗口和未单独配置代理的语音请求会使用此地址。'
   }
   if (appStore.networkProxyStatus?.mode === 'system') {
     return appStore.networkProxyStatus.active
-      ? '已读取本机系统代理，相关网络请求会自动使用。'
+      ? `已读取本机系统代理（${appStore.networkProxyStatus.address || '系统代理'}），相关网络请求会自动使用。`
       : '本机未启用系统代理，相关网络请求将直接连接。'
   }
   return '默认读取本机系统代理；未启用时自动直接连接。'
@@ -618,7 +621,7 @@ watch(() => props.modelValue, (visible) => {
   if (!visible) return
   proxyModeDraft.value = appStore.networkProxyMode
   proxyUrlDraft.value = appStore.networkProxyUrl
-  if (isDesktopApp && proxyModeDraft.value === 'system') {
+  if (isDesktopApp) {
     void appStore.applyNetworkProxy().catch(() => undefined)
   }
 })

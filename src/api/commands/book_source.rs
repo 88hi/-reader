@@ -707,6 +707,13 @@ pub async fn open_external_window(
             .initialization_script(mobile_viewport_script());
     }
 
+    // 应用当前网络代理（如手动代理），让独立验证/登录窗口也走同一代理出口。
+    if let Some(proxy_str) = state.book_service.active_proxy() {
+        if let Ok(proxy_url) = url::Url::parse(&proxy_str) {
+            builder = builder.proxy_url(proxy_url);
+        }
+    }
+
     // 站点里的二级链接（目录、详情、翻页、下载页）常带 `target="_blank"`。
     // 不接管这个回调时 Tauri 走默认实现，在 Windows 上把它们丢给系统浏览器 ——
     // 表现就是「窗口里点链接没反应，浏览器却弹出一个新标签」。

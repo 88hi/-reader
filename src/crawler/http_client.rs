@@ -21,6 +21,7 @@ pub struct ProxyStatus {
 pub struct HttpClient {
     client: Arc<RwLock<Client>>,
     active_proxy: Arc<RwLock<Option<String>>>,
+    manual_mode: Arc<RwLock<bool>>,
     timeout_secs: u64,
     source_sessions: Arc<RwLock<HashMap<String, Arc<SourceSession>>>>,
     source_clients: Arc<RwLock<HashMap<String, Client>>>,
@@ -29,6 +30,7 @@ pub struct HttpClient {
 
 impl HttpClient {
     pub fn new(timeout_secs: u64, proxy: Option<String>) -> anyhow::Result<Self> {
+        let is_manual = proxy.is_some();
         let configured_proxy = match proxy {
             Some(value) => resolve_manual_proxy(&value)?,
             None => resolve_system_proxy(),
@@ -37,6 +39,7 @@ impl HttpClient {
         Ok(Self {
             client: Arc::new(RwLock::new(client)),
             active_proxy: Arc::new(RwLock::new(configured_proxy)),
+            manual_mode: Arc::new(RwLock::new(is_manual)),
             timeout_secs,
             source_sessions: Arc::default(),
             source_clients: Arc::default(),
@@ -131,6 +134,14 @@ impl HttpClient {
             .clone()
     }
 
+    /// 是否处于用户显式指定的手动代理模式。
+    pub fn is_manual_proxy(&self) -> bool {
+        *self
+            .manual_mode
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// 完全不走代理的直连客户端。用于代理出口 IP 被目标站点限流时的回退。
     pub fn client_direct(&self) -> anyhow::Result<Client> {
         build_client(self.timeout_secs, None)
@@ -166,6 +177,7 @@ impl HttpClient {
         mode: ProxyMode,
         proxy: Option<&str>,
     ) -> anyhow::Result<ProxyStatus> {
+        let is_manual = matches!(mode, ProxyMode::Manual);
         let configured_proxy = match mode {
             ProxyMode::System => resolve_system_proxy(),
             ProxyMode::Manual => {
@@ -177,23 +189,20 @@ impl HttpClient {
             }
         };
 
-        let current_proxy = self
+        let client = build_client(self.timeout_secs, configured_proxy.as_deref())?;
+        *self
+            .client
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
+        *self
             .active_proxy
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        if current_proxy != configured_proxy {
-            let client = build_client(self.timeout_secs, configured_proxy.as_deref())?;
-            *self
-                .client
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
-            *self
-                .active_proxy
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = configured_proxy.clone();
-            self.source_clients.write().unwrap_or_else(|e| e.into_inner()).clear();
-        }
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = configured_proxy.clone();
+        *self
+            .manual_mode
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = is_manual;
+        self.source_clients.write().unwrap_or_else(|e| e.into_inner()).clear();
 
         Ok(ProxyStatus {
             active: configured_proxy.is_some(),

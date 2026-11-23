@@ -74,6 +74,10 @@ static JS_STORE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(
 static JS_STORAGE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static JS_DEFAULT_HTTP: OnceLock<HttpClient> = OnceLock::new();
 static JS_FALLBACK_HTTP: Lazy<HttpClient> = Lazy::new(|| HttpClient::new(30, None).expect("JS HTTP client"));
+
+pub fn configure_js_fallback_proxy(mode: crate::crawler::http_client::ProxyMode, proxy: Option<&str>) {
+    let _ = JS_FALLBACK_HTTP.configure_proxy(mode, proxy);
+}
 static JS_HTTP_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("JS HTTP runtime"));
 /// 组装好的 jsLib 源码, 按 jsLib 文本 md5 缓存; `Some(Instant)` 表示含下载失败项, 到期后重试。
 static JS_LIB_CACHE: Lazy<Mutex<HashMap<String, (String, Option<Instant>)>>> =

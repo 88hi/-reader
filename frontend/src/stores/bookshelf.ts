@@ -397,12 +397,53 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   }
 
   // ─── Search ───
+  const SEARCH_SOURCE_PREF_KEY = 'reader-search-source-pref'
+
+  type SearchSourcePref = {
+    scope: 'all' | 'group' | 'source'
+    group: string
+    sourceUrl: string
+  }
+
+  function readSearchSourcePref(): SearchSourcePref {
+    try {
+      const raw = localStorage.getItem(SEARCH_SOURCE_PREF_KEY)
+      if (!raw) return { scope: 'group', group: '', sourceUrl: '' }
+      const parsed = JSON.parse(raw) as Partial<SearchSourcePref>
+      const scope = parsed.scope === 'all' || parsed.scope === 'group' || parsed.scope === 'source'
+        ? parsed.scope
+        : 'group'
+      return {
+        scope,
+        group: typeof parsed.group === 'string' ? parsed.group : '',
+        sourceUrl: typeof parsed.sourceUrl === 'string' ? parsed.sourceUrl : '',
+      }
+    } catch {
+      return { scope: 'group', group: '', sourceUrl: '' }
+    }
+  }
+
+  function saveSearchSourcePref(pref: Partial<SearchSourcePref>) {
+    try {
+      const current = readSearchSourcePref()
+      const next: SearchSourcePref = {
+        scope: pref.scope ?? current.scope,
+        group: pref.group ?? current.group,
+        sourceUrl: pref.sourceUrl ?? current.sourceUrl,
+      }
+      localStorage.setItem(SEARCH_SOURCE_PREF_KEY, JSON.stringify(next))
+    } catch {
+      // Ignore unavailable storage.
+    }
+  }
+
+  const initialSearchPref = readSearchSourcePref()
   const searchResults = ref<SearchBook[]>([])
   const isSearching = ref(false)
   const searchKey = ref('')
-  const searchScope = ref<'all' | 'group' | 'source'>('group')
-  const searchGroup = ref('')
-  const searchSourceUrl = ref('')
+  const searchScope = ref<'all' | 'group' | 'source'>(initialSearchPref.scope)
+  const searchGroup = ref(initialSearchPref.group)
+  const searchSourceUrl = ref(initialSearchPref.sourceUrl)
 
   function startSearch(key: string, options: {
     scope?: 'all' | 'group' | 'source'
@@ -415,9 +456,15 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
       return
     }
 
-    searchScope.value = options.scope || 'group'
-    searchGroup.value = options.group || ''
-    searchSourceUrl.value = options.sourceUrl || ''
+    const saved = readSearchSourcePref()
+    const nextScope = options.scope || saved.scope || 'group'
+    const nextGroup = options.group !== undefined ? options.group : (searchGroup.value || saved.group)
+    const nextSourceUrl = options.sourceUrl !== undefined ? options.sourceUrl : (searchSourceUrl.value || saved.sourceUrl)
+
+    searchScope.value = nextScope
+    searchGroup.value = nextGroup
+    searchSourceUrl.value = nextSourceUrl
+    saveSearchSourcePref({ scope: nextScope, group: nextGroup, sourceUrl: nextSourceUrl })
     searchKey.value = nextKey
   }
 
@@ -425,14 +472,11 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
    *
    *  同时清掉搜索结果缓存：离开搜索页就代表这轮搜索结束，下次再搜同一个词
    *  应当拿最新结果，而不是先看到一份过期列表。
-   *  注意「进阅读页」不走这里 —— 那是临时离开，缓存要留着。 */
+   *  保留上次选择的搜索范围与书源分组偏好，下次搜索自动沿用。 */
   function clearSearch() {
     searchResults.value = []
     searchKey.value = ''
     isSearching.value = false
-    searchScope.value = 'group'
-    searchGroup.value = ''
-    searchSourceUrl.value = ''
     getSearchSessionCache().clear()
   }
 
@@ -621,6 +665,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     fetchGroups, saveGroup, reorderGroups, removeGroup, removeGroups,
     searchResults, isSearching, searchKey,
     searchScope, searchGroup, searchSourceUrl, startSearch, clearSearch, isSearchMode,
+    readSearchSourcePref, saveSearchSourcePref,
     editMode,
     selectedBookUrls, toggleSelection, selectAll, clearSelection,
     bulkDelete, bulkSetGroup, setBookGroup, setBooksGroupMask, reorderBooks, moveBookToFront,

@@ -1033,6 +1033,7 @@ impl BookService {
         proxy: Option<&str>,
     ) -> anyhow::Result<ProxyStatus> {
         let status = self.http.configure_proxy(mode, proxy)?;
+        crate::parser::js::configure_js_fallback_proxy(mode, proxy);
         // A proxy switch invalidates any in-flight login preview tokens. This
         // prevents a session created under one network path from being reused
         // after the request routing has changed.
@@ -1480,7 +1481,8 @@ impl BookService {
         response: FetchResponse,
         cancel: Option<&CancelSignal>,
     ) -> FetchResponse {
-        if !used_proxy || !response_looks_proxy_blocked(&response) {
+        // 用户显式启用手动代理时，不静默回退到直连，确保所有书源请求严格走手动代理。
+        if !used_proxy || self.http.is_manual_proxy() || !response_looks_proxy_blocked(&response) {
             return response;
         }
         if is_cancelled(cancel) {
