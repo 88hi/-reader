@@ -917,13 +917,9 @@ watch(columnMenuOpen, (open) => {
 const sortMenuOpen = ref(false)
 const sortMenuRef = ref<HTMLElement | null>(null)
 
-/** 应用排序方式。选中具体分组时写该分组的 bookSort, 否则写全局偏好。 */
+/** 应用排序方式：每个书架分组（含全部/未分组/自定义分组）使用独立排序。 */
 async function applySort(value: number) {
-  if (shelfStore.activeGroupId > 0) {
-    await shelfStore.setActiveGroupSort(value)
-  } else {
-    shelfStore.setSortMode(value)
-  }
+  await shelfStore.setActiveGroupSort(value)
 }
 
 async function chooseSort(value: number) {

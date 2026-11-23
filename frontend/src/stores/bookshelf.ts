@@ -238,19 +238,51 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   })
 
   // ─── 书架排序 ───
-  /** 全局排序方式(持久化到 localStorage, 对齐 Legado 的 `AppConfig.bookshelfSort`)。 */
+  const BOOK_GROUP_SORTS_KEY = 'bookshelf-group-sorts'
+
+  function readStoredGroupSorts(): Record<string, number> {
+    try {
+      const raw = localStorage.getItem(BOOK_GROUP_SORTS_KEY)
+      if (!raw) return {}
+      const parsed = JSON.parse(raw) as Record<string, unknown>
+      if (!parsed || typeof parsed !== 'object') return {}
+      const next: Record<string, number> = {}
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === 'number' && Number.isFinite(v) && !isRetiredBookSort(v)) {
+          next[k] = toAvailableBookSort(v)
+        }
+      }
+      return next
+    } catch {
+      return {}
+    }
+  }
+
+  function writeStoredGroupSorts(map: Record<string, number>) {
+    try {
+      localStorage.setItem(BOOK_GROUP_SORTS_KEY, JSON.stringify(map))
+    } catch {
+      // Ignore unavailable storage.
+    }
+  }
+
+  /** 全局默认排序方式(持久化到 localStorage, 对齐 Legado 的 `AppConfig.bookshelfSort`)。 */
   const sortMode = ref(toAvailableBookSort(readStoredSort()))
-  /** 当前分组自己的排序方式; 分组没有单独设置时返回 null, 由全局设置兜底。 */
+  /** 每个分组独立的排序方式（含全部 -1、未分组 0 及所有自定义分组）。 */
+  const groupSortMap = ref<Record<string, number>>(readStoredGroupSorts())
+
+  /** 当前分组自己的排序方式; 分组没有单独设置时返回 null, 由全局默认兜底。 */
   const activeGroupSort = computed<number | null>(() => {
     const id = activeGroupId.value
-    if (id <= 0) return null
-    const group = groups.value.find((g) => g.groupId === id)
-    // Legado 用 -1 表示「跟随全局」, 缺失/null 同理。
-    if (!group || typeof group.bookSort !== 'number' || group.bookSort < 0) return null
-    // 分组上若还留着已下架的「手动排序」, 同样按「跟随全局」处理 —— 否则这个
-    // 分组会永远按 order 排序, 而菜单里没有能改回来的选项。
-    if (isRetiredBookSort(group.bookSort)) return null
-    return group.bookSort
+    const key = String(id)
+    if (id > 0) {
+      const group = groups.value.find((g) => g.groupId === id)
+      if (group && typeof group.bookSort === 'number' && group.bookSort >= 0 && !isRetiredBookSort(group.bookSort)) {
+        return group.bookSort
+      }
+    }
+    const stored = groupSortMap.value[key]
+    return typeof stored === 'number' ? stored : null
   })
   /** 当前实际生效的排序方式: 分组级设置优先于全局。 */
   const effectiveSortMode = computed(() => activeGroupSort.value ?? sortMode.value)
@@ -267,9 +299,19 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     writeStoredSort(sortMode.value)
   }
 
-  /** 设置当前分组的排序方式。`null` 表示跟随全局(写回 -1, 与 Legado 同义)。 */
+  /** 设置当前分组的独立排序方式（支持全部、未分组及所有自定义分组）。`null` 表示跟随全局。 */
   async function setActiveGroupSort(value: number | null) {
     const id = activeGroupId.value
+    const key = String(id)
+    const nextMap = { ...groupSortMap.value }
+    if (value === null) {
+      delete nextMap[key]
+    } else {
+      nextMap[key] = toAvailableBookSort(value)
+    }
+    groupSortMap.value = nextMap
+    writeStoredGroupSorts(nextMap)
+
     if (id <= 0) return
     const group = groups.value.find((g) => g.groupId === id)
     if (!group) return

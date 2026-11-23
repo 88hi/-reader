@@ -832,6 +832,18 @@ const sameSourceCandidates = computed<SearchBook[]>(() => {
   return list
 })
 
+function isSameSourceProbeOk(key: string): boolean {
+  return sameSourceProbeStatus.value[key]?.status === 'ok'
+}
+
+function extractLatestChapterLabel(chapters: BookChapter[]): string {
+  for (let i = chapters.length - 1; i >= 0; i--) {
+    const title = (chapters[i]?.title || '').trim()
+    if (title) return title
+  }
+  return chapters.length > 0 ? `共 ${chapters.length} 章` : ''
+}
+
 async function fetchBookChaptersForPreview(book: Book | SearchBook): Promise<BookChapter[]> {
   let tocUrl = book.bookUrl
   try {
@@ -853,43 +865,72 @@ async function probeSameSourceCandidates(candidates: SearchBook[]) {
   const pending = candidates.filter((cand) => {
     if ((cand.lastChapter || '').trim()) return false
     const key = sameSourceCandidateKey(cand)
-    return !sameSourceProbeStatus.value[key]
+    if (sameSourceTocCache.has(key)) return false
+    const existing = sameSourceProbeStatus.value[key]
+    return !existing || existing.status === 'failed'
   })
   if (pending.length === 0) return
 
   const nextStatus = { ...sameSourceProbeStatus.value }
   for (const cand of pending) {
-    nextStatus[sameSourceCandidateKey(cand)] = { status: 'loading' }
+    const key = sameSourceCandidateKey(cand)
+    if (nextStatus[key]?.status !== 'ok') {
+      nextStatus[key] = { status: 'loading' }
+    }
   }
   sameSourceProbeStatus.value = nextStatus
 
-  const queue = pending.slice()
-  const concurrency = Math.min(4, queue.length)
+  // 按书源域名分组串行探测，避免同一书源被并发请求触发限流而误报「目录加载失败」
+  const byOrigin = new Map<string, SearchBook[]>()
+  for (const cand of pending) {
+    const list = byOrigin.get(cand.origin) || []
+    list.push(cand)
+    byOrigin.set(cand.origin, list)
+  }
+  const originQueues = Array.from(byOrigin.values())
+  const concurrency = Math.min(3, originQueues.length)
   const workers = Array.from({ length: concurrency }, async () => {
-    while (queue.length > 0) {
+    while (originQueues.length > 0) {
       if (generation !== sameSourceProbeGeneration) return
-      const cand = queue.shift()
-      if (!cand) return
-      const key = sameSourceCandidateKey(cand)
-      try {
-        const chapters = await fetchBookChaptersForPreview(cand)
-        if (chapters.length > 0) {
+      const group = originQueues.shift()
+      if (!group) return
+      for (const cand of group) {
+        if (generation !== sameSourceProbeGeneration) return
+        const key = sameSourceCandidateKey(cand)
+        if (sameSourceTocCache.has(key) || isSameSourceProbeOk(key)) {
+          continue
+        }
+        let chapters: BookChapter[] = []
+        let succeeded = false
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            chapters = await fetchBookChaptersForPreview(cand)
+            if (chapters.length > 0) {
+              succeeded = true
+              break
+            }
+          } catch {
+            // 首次失败时短暂重试一次
+          }
+          if (attempt === 0) {
+            await new Promise((r) => window.setTimeout(r, 350))
+          }
+        }
+        // 探测期间若用户已手动点开并成功加载目录，则绝不覆盖为失败
+        if (sameSourceTocCache.has(key) || isSameSourceProbeOk(key)) {
+          continue
+        }
+        if (succeeded && chapters.length > 0) {
           sameSourceTocCache.set(key, chapters)
-          const latestTitle = (chapters[chapters.length - 1]?.title || '').trim()
           sameSourceProbeStatus.value = {
             ...sameSourceProbeStatus.value,
-            [key]: latestTitle ? { status: 'ok', latest: latestTitle } : { status: 'failed' },
+            [key]: { status: 'ok', latest: extractLatestChapterLabel(chapters) },
           }
         } else {
           sameSourceProbeStatus.value = {
             ...sameSourceProbeStatus.value,
             [key]: { status: 'failed' },
           }
-        }
-      } catch {
-        sameSourceProbeStatus.value = {
-          ...sameSourceProbeStatus.value,
-          [key]: { status: 'failed' },
         }
       }
     }
@@ -1134,6 +1175,11 @@ async function openBookTocPreview(book: Book | SearchBook) {
   if (cached && cached.length > 0) {
     previewChapters.value = cached
     previewTocLoading.value = false
+    sameSourceProbeStatus.value = {
+      ...sameSourceProbeStatus.value,
+      [cacheKey]: { status: 'ok', latest: extractLatestChapterLabel(cached) },
+    }
+    void selectSearchChapter(cached[0])
     return
   }
 
@@ -1145,11 +1191,11 @@ async function openBookTocPreview(book: Book | SearchBook) {
     previewChapters.value = chapters
     if (chapters.length > 0) {
       sameSourceTocCache.set(cacheKey, chapters)
-      const latestTitle = (chapters[chapters.length - 1]?.title || '').trim()
       sameSourceProbeStatus.value = {
         ...sameSourceProbeStatus.value,
-        [cacheKey]: latestTitle ? { status: 'ok', latest: latestTitle } : { status: 'failed' },
+        [cacheKey]: { status: 'ok', latest: extractLatestChapterLabel(chapters) },
       }
+      void selectSearchChapter(chapters[0])
     } else {
       sameSourceProbeStatus.value = {
         ...sameSourceProbeStatus.value,

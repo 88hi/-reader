@@ -5396,9 +5396,11 @@ watch(
   width: min(520px, 94vw);
 }
 
-/* 换源面板复用搜索结果的四栏联动视图，需要更宽的抽屉宽度。 */
+/* 换源面板复用搜索结果的联动视图，填满整个阅读页面。 */
 .reader-drawer.drawer-source-wide {
-  width: min(1240px, 95vw);
+  width: 100vw;
+  max-width: 100vw;
+  right: 0;
 }
 
 .selection-menu {
