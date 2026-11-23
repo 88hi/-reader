@@ -176,11 +176,11 @@
             :key="`${book.origin}::${book.bookUrl}`"
             class="search-book-row"
             :class="{
-              active: isPreviewBook(book) || isSameSourceBook(book),
+              active: isSameSourceBook(book),
               current: isCurrentSourceBook(book),
             }"
             role="listitem"
-            @click="openBookTocPreview(book)"
+            @click="selectBookCard(book)"
             @contextmenu.prevent="handleBookContextMenu({ book, event: $event })"
           >
             <div class="search-book-cover">
@@ -199,51 +199,14 @@
             <div class="search-book-info">
               <div class="search-book-title-line">
                 <span class="search-book-title" :title="book.name">{{ book.name }}</span>
-                <span v-if="isCurrentSourceBook(book)" class="search-book-chip current">当前书源</span>
+                <span v-if="isCurrentSourceBook(book)" class="search-book-chip current">当前</span>
               </div>
               <div class="search-book-meta-line">
-                <span class="search-book-author">{{ book.author || '未知作者' }}</span>
-                <span class="search-book-chip source" :title="book.originName || book.origin">
-                  {{ book.originName || book.origin }}
+                <span class="search-book-author" :title="book.author || '未知作者'">{{ book.author || '未知作者' }}</span>
+                <span class="search-book-count-badge" :title="`${sameSourceCount(book)} 个同源书源`">
+                  {{ sameSourceCount(book) }}
                 </span>
               </div>
-              <div v-if="book.lastChapter" class="search-book-latest" :title="book.lastChapter">
-                最新：{{ book.lastChapter }}
-              </div>
-            </div>
-
-            <div class="search-book-actions" @click.stop>
-              <template v-if="isSwitchMode">
-                <button
-                  type="button"
-                  class="row-action-btn"
-                  :class="{ primary: !isCurrentSourceBook(book), muted: isCurrentSourceBook(book) }"
-                  :disabled="switchLoading || isCurrentSourceBook(book)"
-                  @click="handleSwitchToBook(book)"
-                >
-                  {{ isCurrentSourceBook(book) ? '当前源' : '切换此源' }}
-                </button>
-              </template>
-              <template v-else>
-                <button
-                  type="button"
-                  class="row-action-btn"
-                  :class="{ muted: isInShelf(book), primary: !isInShelf(book) }"
-                  :disabled="isInShelf(book)"
-                  @click="handleAddToShelf(book)"
-                >
-                  {{ isInShelf(book) ? '已加入' : '+ 书架' }}
-                </button>
-              </template>
-              <button
-                type="button"
-                class="row-action-btn same-source-btn"
-                :class="{ active: isSameSourceBook(book) }"
-                :title="`查看《${book.name}》同源书源列表`"
-                @click="toggleSameSourcesPane(book)"
-              >
-                同源<template v-if="sameSourceCount(book) > 1"> ({{ sameSourceCount(book) }})</template>
-              </button>
             </div>
           </div>
           <button
@@ -257,7 +220,7 @@
         </div>
       </div>
 
-      <!-- 同源书源列表面板：点击书籍卡片的「同源」按键后在右侧展开 -->
+      <!-- 同源书源列表面板：点击书籍卡片后在右侧展开 -->
       <aside v-if="sameSourceBook" class="search-same-source-pane" aria-label="同源书源列表">
         <div class="sidebar-header">
           <span class="toc-pane-title" :title="sameSourceBook.name">
@@ -298,8 +261,15 @@
                 @click.stop="handleAddToShelf(cand)"
               >{{ isInShelf(cand) ? '已加' : '+书架' }}</button>
             </div>
-            <div v-if="cand.lastChapter" class="same-source-item-latest" :title="cand.lastChapter">
-              {{ cand.lastChapter }}
+            <div
+              class="same-source-item-latest"
+              :class="{
+                'is-error': getSameSourceLatestInfo(cand).status === 'failed',
+                'is-loading': getSameSourceLatestInfo(cand).status === 'loading',
+              }"
+              :title="getSameSourceLatestInfo(cand).text"
+            >
+              {{ getSameSourceLatestInfo(cand).text }}
             </div>
           </div>
         </div>
@@ -785,6 +755,13 @@ watch(searchKey, () => {
 })
 
 const sameSourceBook = ref<SearchBook | null>(null)
+const sameSourceTocCache = new Map<string, BookChapter[]>()
+const sameSourceProbeStatus = ref<Record<string, { status: 'loading' | 'ok' | 'failed'; latest?: string }>>({})
+let sameSourceProbeGeneration = 0
+
+function sameSourceCandidateKey(book: Pick<Book | SearchBook, 'origin' | 'bookUrl'>): string {
+  return `${book.origin}::${book.bookUrl}`
+}
 
 function sameSourceCount(book: SearchBook): number {
   if (book.sourceCandidates?.length) return book.sourceCandidates.length
@@ -797,16 +774,29 @@ function isSameSourceBook(book: SearchBook): boolean {
   return searchMergeKey(sameSourceBook.value) === searchMergeKey(book)
 }
 
-function toggleSameSourcesPane(book: SearchBook) {
-  if (isSameSourceBook(book)) {
-    sameSourceBook.value = null
-    return
-  }
+function selectBookCard(book: SearchBook) {
+  const switchedBook = !isSameSourceBook(book)
   sameSourceBook.value = book
+  if (switchedBook && previewBook.value && searchMergeKey(previewBook.value) !== searchMergeKey(book)) {
+    closeBookTocPreview()
+  }
 }
 
 function closeSameSourcesPane() {
   sameSourceBook.value = null
+}
+
+function getSameSourceLatestInfo(cand: SearchBook): { status: 'ok' | 'loading' | 'failed'; text: string } {
+  const key = sameSourceCandidateKey(cand)
+  const probed = sameSourceProbeStatus.value[key]
+  if (probed) {
+    if (probed.status === 'failed') return { status: 'failed', text: '目录加载失败' }
+    if (probed.status === 'loading') return { status: 'loading', text: '正在获取目录…' }
+    if (probed.latest) return { status: 'ok', text: probed.latest }
+  }
+  const direct = (cand.lastChapter || '').trim()
+  if (direct) return { status: 'ok', text: direct }
+  return { status: 'loading', text: '正在获取目录…' }
 }
 
 const sameSourceCandidates = computed<SearchBook[]>(() => {
@@ -840,6 +830,77 @@ const sameSourceCandidates = computed<SearchBook[]>(() => {
     })
   }
   return list
+})
+
+async function fetchBookChaptersForPreview(book: Book | SearchBook): Promise<BookChapter[]> {
+  let tocUrl = book.bookUrl
+  try {
+    const info = await getBookInfo(book.bookUrl, book.origin)
+    if (info?.tocUrl) tocUrl = info.tocUrl
+  } catch {
+    // 详情解析失败时仍尝试直接用 bookUrl 获取目录
+  }
+  const chapters = await getChapterList({
+    bookUrl: book.bookUrl,
+    tocUrl,
+    bookSourceUrl: book.origin,
+  })
+  return Array.isArray(chapters) ? chapters : []
+}
+
+async function probeSameSourceCandidates(candidates: SearchBook[]) {
+  const generation = ++sameSourceProbeGeneration
+  const pending = candidates.filter((cand) => {
+    if ((cand.lastChapter || '').trim()) return false
+    const key = sameSourceCandidateKey(cand)
+    return !sameSourceProbeStatus.value[key]
+  })
+  if (pending.length === 0) return
+
+  const nextStatus = { ...sameSourceProbeStatus.value }
+  for (const cand of pending) {
+    nextStatus[sameSourceCandidateKey(cand)] = { status: 'loading' }
+  }
+  sameSourceProbeStatus.value = nextStatus
+
+  const queue = pending.slice()
+  const concurrency = Math.min(4, queue.length)
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (queue.length > 0) {
+      if (generation !== sameSourceProbeGeneration) return
+      const cand = queue.shift()
+      if (!cand) return
+      const key = sameSourceCandidateKey(cand)
+      try {
+        const chapters = await fetchBookChaptersForPreview(cand)
+        if (chapters.length > 0) {
+          sameSourceTocCache.set(key, chapters)
+          const latestTitle = (chapters[chapters.length - 1]?.title || '').trim()
+          sameSourceProbeStatus.value = {
+            ...sameSourceProbeStatus.value,
+            [key]: latestTitle ? { status: 'ok', latest: latestTitle } : { status: 'failed' },
+          }
+        } else {
+          sameSourceProbeStatus.value = {
+            ...sameSourceProbeStatus.value,
+            [key]: { status: 'failed' },
+          }
+        }
+      } catch {
+        sameSourceProbeStatus.value = {
+          ...sameSourceProbeStatus.value,
+          [key]: { status: 'failed' },
+        }
+      }
+    }
+  })
+  await Promise.all(workers)
+}
+
+watch(sameSourceCandidates, (list) => {
+  if (list.length > 0) {
+    void probeSameSourceCandidates(list)
+  }
 })
 
 const displayedResults = computed<SearchBook[]>(() => {
@@ -1067,28 +1128,41 @@ async function openBookTocPreview(book: Book | SearchBook) {
   previewBook.value = book
   previewChapters.value = []
   previewTocError.value = ''
-  previewTocLoading.value = true
   resetSearchChapterPreview()
+  const cacheKey = sameSourceCandidateKey(book)
+  const cached = sameSourceTocCache.get(cacheKey)
+  if (cached && cached.length > 0) {
+    previewChapters.value = cached
+    previewTocLoading.value = false
+    return
+  }
+
+  previewTocLoading.value = true
   const token = ++previewTocToken
   try {
-    let tocUrl = book.bookUrl
-    try {
-      const info = await getBookInfo(book.bookUrl, book.origin)
-      if (token !== previewTocToken) return
-      if (info?.tocUrl) tocUrl = info.tocUrl
-    } catch {
-      // 详情解析失败时仍尝试直接用 bookUrl 获取目录
-    }
-    const chapters = await getChapterList({
-      bookUrl: book.bookUrl,
-      tocUrl,
-      bookSourceUrl: book.origin,
-    })
+    const chapters = await fetchBookChaptersForPreview(book)
     if (token !== previewTocToken) return
-    previewChapters.value = Array.isArray(chapters) ? chapters : []
+    previewChapters.value = chapters
+    if (chapters.length > 0) {
+      sameSourceTocCache.set(cacheKey, chapters)
+      const latestTitle = (chapters[chapters.length - 1]?.title || '').trim()
+      sameSourceProbeStatus.value = {
+        ...sameSourceProbeStatus.value,
+        [cacheKey]: latestTitle ? { status: 'ok', latest: latestTitle } : { status: 'failed' },
+      }
+    } else {
+      sameSourceProbeStatus.value = {
+        ...sameSourceProbeStatus.value,
+        [cacheKey]: { status: 'failed' },
+      }
+    }
   } catch (e: unknown) {
     if (token !== previewTocToken) return
     previewTocError.value = (e as Error).message || '目录加载失败'
+    sameSourceProbeStatus.value = {
+      ...sameSourceProbeStatus.value,
+      [cacheKey]: { status: 'failed' },
+    }
   } finally {
     if (token === previewTocToken) {
       previewTocLoading.value = false
@@ -2059,8 +2133,8 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
 }
 
 .search-books-pane.is-split {
-  flex: 0 0 286px;
-  width: 286px;
+  flex: 0 0 216px;
+  width: 216px;
 }
 
 .books-empty-state {
@@ -2333,6 +2407,18 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   text-overflow: ellipsis;
 }
 
+.search-book-count-badge {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+  color: var(--color-primary);
+}
+
 .same-source-item-latest {
   font-size: 11px;
   color: var(--color-text-tertiary);
@@ -2341,9 +2427,18 @@ function handleBookContextMenu({ book, event }: { book: Book | SearchBook; event
   text-overflow: ellipsis;
 }
 
+.same-source-item-latest.is-error {
+  color: color-mix(in srgb, var(--color-danger) 82%, var(--color-text-tertiary));
+}
+
+.same-source-item-latest.is-loading {
+  opacity: 0.65;
+  font-style: italic;
+}
+
 .search-toc-pane {
-  flex: 0 0 260px;
-  width: 260px;
+  flex: 0 0 236px;
+  width: 236px;
   position: sticky;
   top: var(--space-3);
   max-height: calc(100vh - 200px);

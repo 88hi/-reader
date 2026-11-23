@@ -135,7 +135,7 @@ import { useBookshelfStore } from '../stores/bookshelf'
 import { useExploreStore } from '../stores/explore'
 
 const SEARCH_HISTORY_KEY = 'reader-search-history'
-const MAX_SEARCH_HISTORY = 15
+const MAX_SEARCH_HISTORY = 60
 
 function loadSearchHistory(): string[] {
   try {
