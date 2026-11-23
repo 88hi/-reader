@@ -66,6 +66,7 @@
               :empty-title="sources.length ? '没有匹配的书源' : '暂无书源'"
               :empty-description="sources.length ? '调整搜索关键词或分组筛选后再试' : '可以本地导入、网络导入或手动新增'"
               @edit="editSource"
+              @verify="verifySourceCloudflare"
               @toggle-enabled="toggleSource"
               @toggle-selection="toggleSourceSelection"
               @delete="removeSource"
@@ -146,6 +147,7 @@ import {
 } from '../api/source'
 import { useAppStore } from '../stores/app'
 import { isTauriRuntime } from '../api/transport'
+import { openExternalWindow } from '../api/sourceClick'
 import { useSourceStore } from '../stores/source'
 import type { BookSource } from '../types'
 import {
@@ -491,6 +493,7 @@ function buildSourceMenuItems(source: BookSource, opts: { includeEdit?: boolean 
     { label: '添加到分组…', action: () => openGroupPrompt('add', [source]) },
     { label: '从分组移除…', action: () => openGroupPrompt('remove', [source]) },
     { divider: true },
+    { label: 'Cloudflare 验证', action: () => verifySourceCloudflare(source) },
     { label: '导出此书源', action: () => exportSourcesList([source]) },
     {
       label: '测试此书源',
@@ -504,6 +507,28 @@ function buildSourceMenuItems(source: BookSource, opts: { includeEdit?: boolean 
     { label: '删除', danger: true, action: () => removeSource(source) },
   )
   return items
+}
+
+async function verifySourceCloudflare(source: BookSource) {
+  const candidateUrl = (source.loginUrl || '').trim()
+  const targetUrl = /^https?:\/\//i.test(candidateUrl) ? candidateUrl : source.bookSourceUrl
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    appStore.showToast('该书源没有可用的网页地址', 'warning')
+    return
+  }
+  try {
+    await openExternalWindow(
+      targetUrl,
+      `${source.bookSourceName || source.bookSourceUrl} - Cloudflare 验证`,
+      source.bookSourceUrl,
+    )
+    appStore.showToast(
+      `已打开「${source.bookSourceName || source.bookSourceUrl}」验证窗口，完成验证后关闭窗口即可自动保存 Cookie`,
+      'success',
+    )
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '打开 Cloudflare 验证窗口失败', 'error')
+  }
 }
 
 async function removeSelectedSources() {

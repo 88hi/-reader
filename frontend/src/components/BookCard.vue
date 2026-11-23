@@ -31,11 +31,6 @@
         <span class="cover-author">{{ book.author || '佚名' }}</span>
       </div>
 
-      <!-- Unread badge -->
-      <div v-if="unreadCount > 0 && !editMode" class="unread-badge">
-        {{ unreadCount > 99 ? '99+' : unreadCount }}
-      </div>
-
       <!-- Selection overlay -->
       <div v-if="editMode" class="selection-overlay">
         <div class="checkbox" :class="{ checked: selected }">
@@ -156,12 +151,6 @@ const placeholderThemeClass = computed(() => {
     hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0
   }
   return `cover-theme-${Math.abs(hash) % 6}`
-})
-
-const unreadCount = computed(() => {
-  const b = props.book as Book
-  if (!b.totalChapterNum || b.durChapterIndex === undefined) return 0
-  return Math.max(0, b.totalChapterNum - 1 - b.durChapterIndex)
 })
 
 const serverCachedCount = computed(() => isLocalBook(asBook.value) ? 0 : Math.max(0, asBook.value.cachedChapterCount || 0))

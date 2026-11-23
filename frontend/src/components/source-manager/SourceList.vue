@@ -31,6 +31,17 @@
           <button
             class="icon-btn small"
             type="button"
+            title="Cloudflare 验证"
+            @click="$emit('verify', source)"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              <path d="m9 12 2 2 4-4" />
+            </svg>
+          </button>
+          <button
+            class="icon-btn small"
+            type="button"
             :title="isPinned(source) ? '取消置顶' : '置顶'"
             :class="{ pinned: isPinned(source) }"
             @click="togglePin(source)"
@@ -91,6 +102,7 @@ function togglePin(source: BookSource) {
 
 const emit = defineEmits<{
   edit: [source: BookSource]
+  verify: [source: BookSource]
   'toggle-enabled': [source: BookSource]
   'toggle-selection': [source: BookSource]
   delete: [source: BookSource]

@@ -25,7 +25,7 @@
             {{ searchProgressText }}
           </span>
           <span v-else class="result-count">
-            ({{ rankedResults.length }} 个结果<template v-if="searchProgress.totalSources > 0"> · 已扫 {{ searchProgress.totalSources }} 个书源</template>)
+            ({{ expandedAllSourceResults.length }} 个结果<template v-if="searchProgress.totalSources > 0"> · 已扫 {{ searchProgress.totalSources }} 个书源</template>)
           </span>
           <!-- 结果来自会话缓存时标一下；点它可重搜。 -->
           <button
@@ -138,7 +138,7 @@
             @click="selectResultSource('')"
           >
             <span class="sidebar-source-name">全部书源</span>
-            <span class="sidebar-source-count">{{ rankedResults.length }}</span>
+            <span class="sidebar-source-count">{{ expandedAllSourceResults.length }}</span>
           </button>
           <button
             v-for="item in resultSourceSummaries"
@@ -397,6 +397,7 @@ import { useAppStore } from '../stores/app'
 import { useSourceStore } from '../stores/source'
 import { searchBookMultiSSE } from '../api/search'
 import { deleteBookSource, pinBookSource, saveBookSource } from '../api/source'
+import { openExternalWindow } from '../api/sourceClick'
 import type { SseLike } from '../api/sse'
 import { getBookContent, getBookInfo, getChapterList, getCoverUrl, saveBook } from '../api/bookshelf'
 import { createCoverCacheSession } from '../utils/coverCacheSession'
@@ -729,9 +730,43 @@ watch(searchKey, () => {
   visibleBookLimit.value = INITIAL_VISIBLE_BOOKS
 })
 
+/** 展开所有命中的候选书源条目，避免选「全部书源」时同名多源被折叠成 1 条而漏显。 */
+const expandedAllSourceResults = computed<SearchBook[]>(() => {
+  const expanded: SearchBook[] = []
+  const seen = new Set<string>()
+  for (const book of rankedResults.value) {
+    if (book.sourceCandidates && book.sourceCandidates.length > 0) {
+      for (const candidate of book.sourceCandidates) {
+        const origin = candidate.origin || book.origin
+        const bookUrl = candidate.bookUrl || book.bookUrl
+        const key = `${origin}::${bookUrl}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        const source = sourceByUrl.value.get(origin)
+        expanded.push({
+          ...book,
+          ...candidate,
+          origin,
+          bookUrl,
+          originName: candidate.originName || source?.bookSourceName || origin,
+          originGroup: source?.bookSourceGroup ?? candidate.originGroup ?? book.originGroup,
+          bookSourceUrls: book.bookSourceUrls,
+          sourceCandidates: book.sourceCandidates,
+        })
+      }
+      continue
+    }
+    const key = `${book.origin}::${book.bookUrl}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    expanded.push(book)
+  }
+  return expanded
+})
+
 const displayedResults = computed<SearchBook[]>(() => {
   const targetOrigin = activeResultSourceUrl.value
-  if (!targetOrigin) return rankedResults.value
+  if (!targetOrigin) return expandedAllSourceResults.value
   const matched: SearchBook[] = []
   for (const book of rankedResults.value) {
     if (book.origin === targetOrigin) {
@@ -826,6 +861,26 @@ function handleSourceContextMenu(item: ResultSourceSummary, event: MouseEvent) {
           appStore.showToast(`已置顶「${item.name}」`, 'success')
         } catch (e: unknown) {
           appStore.showToast((e as Error).message || '置顶书源失败', 'error')
+        }
+      },
+    },
+    {
+      label: 'Cloudflare 验证',
+      action: async () => {
+        const candidateUrl = (source?.loginUrl || '').trim()
+        const targetUrl = /^https?:\/\//i.test(candidateUrl) ? candidateUrl : item.origin
+        if (!/^https?:\/\//i.test(targetUrl)) {
+          appStore.showToast('该书源没有可用的网页地址', 'warning')
+          return
+        }
+        try {
+          await openExternalWindow(targetUrl, `${item.name} - Cloudflare 验证`, item.origin)
+          appStore.showToast(
+            `已打开「${item.name}」验证窗口，完成验证后关闭窗口即可自动保存 Cookie`,
+            'success',
+          )
+        } catch (e: unknown) {
+          appStore.showToast((e as Error).message || '打开 Cloudflare 验证窗口失败', 'error')
         }
       },
     },
