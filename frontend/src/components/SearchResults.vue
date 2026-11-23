@@ -176,7 +176,7 @@
             :key="`${book.origin}::${book.bookUrl}`"
             class="search-book-row"
             :class="{
-              active: isSameSourceBook(book),
+              active: activeResultSourceUrl ? isPreviewBook(book) : isSameSourceBook(book),
               current: isCurrentSourceBook(book),
             }"
             role="listitem"
@@ -733,6 +733,9 @@ function selectResultSource(origin: string) {
   if (activeResultSourceUrl.value === origin) return
   activeResultSourceUrl.value = origin
   visibleBookLimit.value = INITIAL_VISIBLE_BOOKS
+  if (origin) {
+    sameSourceBook.value = null
+  }
   nextTick(() => {
     booksPaneRef.value?.scrollTo({ top: 0 })
   })
@@ -775,6 +778,12 @@ function isSameSourceBook(book: SearchBook): boolean {
 }
 
 function selectBookCard(book: SearchBook) {
+  // 当左侧选中了具体书源时，点击书籍卡片无需显示同源列表，直接展开目录并加载最前章节
+  if (activeResultSourceUrl.value) {
+    sameSourceBook.value = null
+    void openBookTocPreview(book)
+    return
+  }
   const switchedBook = !isSameSourceBook(book)
   sameSourceBook.value = book
   if (switchedBook && previewBook.value && searchMergeKey(previewBook.value) !== searchMergeKey(book)) {

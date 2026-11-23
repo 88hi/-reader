@@ -26,15 +26,15 @@ function book(
 const names = (books: { name?: string }[]) => books.map((b) => b.name)
 
 describe('normalizeBookSort', () => {
-  it('接受 0 到 5(含已从菜单移除的手动排序 3)', () => {
-    for (let i = 0; i <= BOOK_SORT_KEYS.author; i += 1) {
+  it('接受 0 到 6(含已从菜单移除的手动排序 3 与加入时间 6)', () => {
+    for (let i = 0; i <= BOOK_SORT_KEYS.addedAt; i += 1) {
       expect(normalizeBookSort(i)).toBe(i)
     }
   })
 
   it('兜住非法值', () => {
     expect(normalizeBookSort(-1)).toBe(DEFAULT_BOOK_SORT)
-    expect(normalizeBookSort(6)).toBe(DEFAULT_BOOK_SORT)
+    expect(normalizeBookSort(7)).toBe(DEFAULT_BOOK_SORT)
     expect(normalizeBookSort(1.5)).toBe(DEFAULT_BOOK_SORT)
     expect(normalizeBookSort(null)).toBe(DEFAULT_BOOK_SORT)
     expect(normalizeBookSort('abc')).toBe(DEFAULT_BOOK_SORT)
@@ -46,16 +46,17 @@ describe('normalizeBookSort', () => {
 })
 
 describe('排序菜单项', () => {
-  it('不含「手动排序」, 其余五种按 Legado 的值排列', () => {
+  it('不含「手动排序」, 其余六种按值排列', () => {
     expect(BOOK_SORT_OPTIONS.map((option) => option.label)).toEqual([
-      '最近阅读', '更新时间', '书名', '综合', '作者',
+      '最近阅读', '更新时间', '书名', '综合', '作者', '加入时间',
     ])
-    expect(BOOK_SORT_OPTIONS.map((option) => option.value)).toEqual([0, 1, 2, 4, 5])
+    expect(BOOK_SORT_OPTIONS.map((option) => option.value)).toEqual([0, 1, 2, 4, 5, 6])
   })
 
   it('bookSortLabel 对已存的「手动排序」偏好仍显示原名', () => {
     expect(bookSortLabel(BOOK_SORT_KEYS.manual)).toBe('手动排序')
     expect(bookSortLabel(BOOK_SORT_KEYS.author)).toBe('作者')
+    expect(bookSortLabel(BOOK_SORT_KEYS.addedAt)).toBe('加入时间')
     expect(bookSortLabel(99)).toBe('最近阅读')
   })
 })

@@ -180,20 +180,43 @@
         </div>
       </aside>
 
-      <!-- 书籍列表区 -->
-      <main class="content-panel" ref="scrollContainer" @scroll="handleScroll">
-        <div class="books-grid-wrapper" v-if="store.books.length > 0">
-          <BookGrid
-            :books="store.books"
-            :is-search="true"
-            :shelf-book-urls="shelfBookUrls"
-            :shelf-book-keys="shelfBookKeys"
-            empty-text="暂无数据"
-            @click="handleBookInfo"
-            @info="handleBookInfo"
-            @addToShelf="handleAddToShelf"
-            @contextmenu="handleBookContextMenu"
-          />
+      <!-- 书籍列表区（与搜索页一致的紧凑长条卡片） -->
+      <main
+        class="content-panel"
+        :class="{ 'is-split': Boolean(previewBook) }"
+        ref="scrollContainer"
+        @scroll="handleScroll"
+      >
+        <div class="explore-book-list" v-if="store.books.length > 0" role="list">
+          <div
+            v-for="book in store.books"
+            :key="`${book.origin}::${book.bookUrl}`"
+            class="explore-book-row"
+            :class="{ active: isPreviewBook(book) }"
+            role="listitem"
+            @click="openExploreTocPreview(book)"
+            @contextmenu.prevent="handleBookContextMenu({ book, event: $event })"
+          >
+            <div class="explore-book-cover">
+              <img
+                v-if="book.coverUrl && !failedCoverKeys.has(`${book.origin}::${book.bookUrl}`)"
+                :src="getCoverUrl(book.coverUrl, book.origin)"
+                :alt="book.name"
+                loading="lazy"
+                @error="markCoverFailed(book)"
+              />
+              <div v-else class="explore-book-cover-fallback">
+                <span>{{ (book.name || '书').slice(0, 1) }}</span>
+              </div>
+            </div>
+
+            <div class="explore-book-info">
+              <div class="explore-book-title" :title="book.name">{{ book.name }}</div>
+              <div class="explore-book-author" :title="book.author || '未知作者'">
+                {{ book.author || '未知作者' }}
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="loading-state" v-if="store.loading">
@@ -208,6 +231,55 @@
           {{ store.error }}
         </div>
       </main>
+
+      <!-- 右侧目录列表：点击书籍卡片展开，并自动加载最前章节正文 -->
+      <aside v-if="previewBook" class="explore-toc-pane" aria-label="书籍目录预览">
+        <div class="explore-pane-header">
+          <span class="explore-pane-title" :title="previewBook.name">{{ previewBook.name }}</span>
+          <div class="explore-pane-actions">
+            <button
+              type="button"
+              class="explore-mini-btn"
+              :class="{ primary: !isInShelf(previewBook) }"
+              :disabled="isInShelf(previewBook)"
+              @click="handleAddToShelf(previewBook)"
+            >{{ isInShelf(previewBook) ? '已加' : '+书架' }}</button>
+            <button type="button" class="explore-mini-btn" @click="handleBookInfo(previewBook)">详情</button>
+            <button type="button" class="explore-mini-btn" title="关闭目录" @click="closeExploreTocPreview">✕</button>
+          </div>
+        </div>
+        <div v-if="previewTocLoading" class="explore-pane-placeholder">正在加载目录...</div>
+        <div v-else-if="previewTocError" class="explore-pane-placeholder">
+          <span>{{ previewTocError }}</span>
+          <button type="button" class="explore-mini-btn" @click="openExploreTocPreview(previewBook)">重试</button>
+        </div>
+        <div v-else-if="!previewChapters.length" class="explore-pane-placeholder">暂无目录</div>
+        <div v-else class="explore-toc-list">
+          <button
+            v-for="chapter in previewChapters"
+            :key="`${chapter.index}-${chapter.url}`"
+            type="button"
+            class="explore-toc-item"
+            :class="{ active: selectedChapter?.url === chapter.url && selectedChapter?.index === chapter.index }"
+            @click="selectExploreChapter(chapter)"
+          >
+            <span class="explore-toc-item-title">{{ chapter.title }}</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- 最右侧正文预览：自动加载最前章节，点击目录切换 -->
+      <section v-if="previewBook && selectedChapter" class="explore-content-pane" aria-label="章节正文预览">
+        <div class="explore-pane-header">
+          <span class="explore-pane-title" :title="selectedChapter.title">{{ selectedChapter.title }}</span>
+          <button type="button" class="explore-mini-btn primary" @click="handleBookClick(previewBook)">打开阅读</button>
+        </div>
+        <div v-if="selectedChapterLoading" class="explore-pane-placeholder">正在加载正文预览...</div>
+        <div v-else-if="selectedChapterError" class="explore-pane-placeholder">{{ selectedChapterError }}</div>
+        <div v-else class="explore-preview-body">
+          <p v-for="(line, idx) in selectedChapterParagraphs" :key="idx">{{ line }}</p>
+        </div>
+      </section>
     </div>
 
     <!-- 发现页的书只有聚合源认得，详情页不必去全网并发搜「可读书源」：
@@ -239,15 +311,14 @@ import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { EXPLORE_UNGROUPED_VALUE, useExploreStore } from '../stores/explore'
 import { useReaderStore } from '../stores/reader'
-import { saveBook } from '../api/bookshelf'
+import { getBookContent, getBookInfo, getChapterList, getCoverUrl, saveBook } from '../api/bookshelf'
 import { useAppStore } from '../stores/app'
-import BookGrid from '../components/BookGrid.vue'
 import BookDetailModal from '../components/BookDetailModal.vue'
 import SourceBrowserPanel from '../components/SourceBrowserPanel.vue'
 import SourceLoginDialog from '../components/source-manager/SourceLoginDialog.vue'
 import { showContextMenu } from '../composables/useContextMenu'
 import { useSourceImport } from '../composables/useSourceImport'
-import type { Book, SearchBook } from '../types'
+import type { Book, BookChapter, SearchBook } from '../types'
 import { exploreKindLabel, exploreKindType, type ExploreKind } from '../api/explore'
 import { shelfMatchKey } from '../utils/searchRank'
 import { isBookOnShelf } from '../utils/bookEdit'
@@ -265,6 +336,157 @@ const openingBookUrl = ref('')
 const selectedBook = ref<Book | SearchBook | null>(null)
 const showDetail = ref(false)
 const coverCacheSession = createCoverCacheSession()
+const failedCoverKeys = ref<Set<string>>(new Set())
+
+const previewBook = ref<Book | SearchBook | null>(null)
+const previewChapters = ref<BookChapter[]>([])
+const previewTocLoading = ref(false)
+const previewTocError = ref('')
+let previewTocToken = 0
+
+const selectedChapter = ref<BookChapter | null>(null)
+const selectedChapterContent = ref('')
+const selectedChapterLoading = ref(false)
+const selectedChapterError = ref('')
+const exploreTocCache = new Map<string, BookChapter[]>()
+const exploreContentCache = new Map<string, string>()
+let exploreContentToken = 0
+
+const selectedChapterParagraphs = computed(() =>
+  selectedChapterContent.value
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean),
+)
+
+function markCoverFailed(book: Book | SearchBook) {
+  const key = `${book.origin}::${book.bookUrl}`
+  if (failedCoverKeys.value.has(key)) return
+  const next = new Set(failedCoverKeys.value)
+  next.add(key)
+  failedCoverKeys.value = next
+}
+
+function isPreviewBook(book: Book | SearchBook) {
+  return Boolean(
+    previewBook.value
+    && previewBook.value.origin === book.origin
+    && previewBook.value.bookUrl === book.bookUrl,
+  )
+}
+
+function isInShelf(book: Book | SearchBook) {
+  return shelfBookUrls.value.has(book.bookUrl) || shelfBookKeys.value.has(shelfMatchKey(book))
+}
+
+function resetExploreChapterPreview() {
+  exploreContentToken += 1
+  selectedChapter.value = null
+  selectedChapterContent.value = ''
+  selectedChapterLoading.value = false
+  selectedChapterError.value = ''
+}
+
+function closeExploreTocPreview() {
+  previewBook.value = null
+  previewChapters.value = []
+  previewTocLoading.value = false
+  previewTocError.value = ''
+  previewTocToken += 1
+  resetExploreChapterPreview()
+}
+
+async function openExploreTocPreview(book: Book | SearchBook) {
+  previewBook.value = book
+  previewChapters.value = []
+  previewTocError.value = ''
+  resetExploreChapterPreview()
+  const cacheKey = `${book.origin}::${book.bookUrl}`
+  const cached = exploreTocCache.get(cacheKey)
+  if (cached && cached.length > 0) {
+    previewChapters.value = cached
+    previewTocLoading.value = false
+    void selectExploreChapter(cached[0])
+    return
+  }
+
+  previewTocLoading.value = true
+  const token = ++previewTocToken
+  try {
+    let tocUrl = book.bookUrl
+    try {
+      const info = await getBookInfo(book.bookUrl, book.origin)
+      if (token !== previewTocToken) return
+      if (info?.tocUrl) tocUrl = info.tocUrl
+    } catch {
+      // 详情解析失败时仍尝试直接用 bookUrl 获取目录
+    }
+    const chapters = await getChapterList({
+      bookUrl: book.bookUrl,
+      tocUrl,
+      bookSourceUrl: book.origin,
+    })
+    if (token !== previewTocToken) return
+    const list = Array.isArray(chapters) ? chapters : []
+    previewChapters.value = list
+    if (list.length > 0) {
+      exploreTocCache.set(cacheKey, list)
+      void selectExploreChapter(list[0])
+    }
+  } catch (e: unknown) {
+    if (token !== previewTocToken) return
+    previewTocError.value = (e as Error).message || '目录加载失败'
+  } finally {
+    if (token === previewTocToken) {
+      previewTocLoading.value = false
+    }
+  }
+}
+
+async function selectExploreChapter(chapter: BookChapter) {
+  const book = previewBook.value
+  if (!book) return
+  if (selectedChapter.value?.url === chapter.url && selectedChapter.value?.index === chapter.index) {
+    return
+  }
+  selectedChapter.value = chapter
+  selectedChapterError.value = ''
+
+  const cacheKey = `${book.origin}::${chapter.url}`
+  const cached = exploreContentCache.get(cacheKey)
+  if (cached !== undefined) {
+    selectedChapterContent.value = cached
+    selectedChapterLoading.value = false
+    return
+  }
+
+  selectedChapterLoading.value = true
+  selectedChapterContent.value = ''
+  const token = ++exploreContentToken
+  try {
+    const content = await getBookContent({
+      bookUrl: book.bookUrl,
+      chapterUrl: chapter.url,
+      bookSourceUrl: book.origin,
+      chapterTitle: chapter.title,
+      index: chapter.index,
+    })
+    if (token !== exploreContentToken) return
+    const text = typeof content === 'string' ? content : ''
+    exploreContentCache.set(cacheKey, text)
+    selectedChapterContent.value = text || '（本章暂无正文内容）'
+  } catch (e: unknown) {
+    if (token !== exploreContentToken) return
+    selectedChapterError.value = (e as Error).message || '正文加载失败'
+  } finally {
+    if (token === exploreContentToken) {
+      selectedChapterLoading.value = false
+    }
+  }
+}
 
 /** 文本框输入防抖计时器（key 为控件标题）。 */
 const textTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -317,6 +539,7 @@ watch(
 
 function onGroupChange(event: Event) {
   clearTextTimers()
+  closeExploreTocPreview()
   coverCacheSession.release(shelfStore.books)
   void store.setSourceGroup((event.target as HTMLSelectElement).value)
 }
@@ -326,6 +549,7 @@ function onSourceSelect(sourceUrl: string) {
   // 切源时丢弃未触发的输入防抖: 它们的 action 属于上一个源，落定后会被
   // runAction 打到新源上（旧 kind 对新源无意义）。
   clearTextTimers()
+  closeExploreTocPreview()
   coverCacheSession.release(shelfStore.books)
   void store.setSource(sourceUrl)
 }
@@ -347,6 +571,7 @@ function handleScroll() {
 }
 
 function handleCategoryClick(category: ExploreKind) {
+  closeExploreTocPreview()
   coverCacheSession.release(shelfStore.books)
   void store.setCategory(category.url ?? '')
 }
@@ -878,13 +1103,249 @@ function handleBookInfo(book: Book | SearchBook) {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-3);
   position: relative;
   scrollbar-width: thin;
 }
 
-.books-grid-wrapper {
-  margin-bottom: var(--space-4);
+.content-panel.is-split {
+  flex: 0 0 226px;
+  width: 226px;
+  border-right: 1px solid var(--color-border);
+}
+
+.explore-book-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.explore-book-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-elevated);
+  cursor: pointer;
+  transition: border-color var(--duration-fast), background var(--duration-fast), box-shadow var(--duration-fast);
+}
+
+.explore-book-row:hover {
+  border-color: color-mix(in srgb, var(--color-primary) 45%, var(--color-border));
+  background: var(--color-bg-hover);
+}
+
+.explore-book-row.active {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-bg-elevated));
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-primary) 12%, transparent);
+}
+
+.explore-book-cover {
+  width: 36px;
+  height: 50px;
+  flex-shrink: 0;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--color-bg-hover);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.explore-book-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.explore-book-cover-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(155deg, #2b4c6f 0%, #1c3148 100%);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.explore-book-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.explore-book-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explore-book-author {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explore-toc-pane {
+  flex: 0 0 236px;
+  width: 236px;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.explore-content-pane {
+  flex: 1;
+  min-width: 240px;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.explore-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border-light);
+  flex-shrink: 0;
+}
+
+.explore-pane-title {
+  min-width: 0;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explore-pane-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.explore-mini-btn {
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.explore-mini-btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.explore-mini-btn.primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+.explore-mini-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.explore-pane-placeholder {
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.explore-toc-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  scrollbar-width: thin;
+}
+
+.explore-toc-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast), color var(--duration-fast);
+}
+
+.explore-toc-item:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.explore-toc-item.active {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.explore-toc-item-title {
+  min-width: 0;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explore-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px 28px;
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--color-text);
+  scrollbar-width: thin;
+}
+
+.explore-preview-body p {
+  margin: 0 0 0.9em;
+  text-indent: 2em;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* ── 状态提示 ── */

@@ -38,6 +38,7 @@ export interface SortableBook {
   durChapterTime?: number
   latestChapterTime?: number
   lastCheckTime?: number
+  addedAt?: number
   order?: number
 }
 
@@ -54,6 +55,7 @@ export const BOOK_SORT_KEYS = {
   manual: 3,
   comprehensive: 4,
   author: 5,
+  addedAt: 6,
 } as const
 
 /** 菜单展示的排序项。不含「手动排序」: 它需要拖拽配合, 已从菜单移除。 */
@@ -63,6 +65,7 @@ export const BOOK_SORT_OPTIONS: ReadonlyArray<{ value: number; label: string }> 
   { value: BOOK_SORT_KEYS.name, label: '书名' },
   { value: BOOK_SORT_KEYS.comprehensive, label: '综合' },
   { value: BOOK_SORT_KEYS.author, label: '作者' },
+  { value: BOOK_SORT_KEYS.addedAt, label: '加入时间' },
 ]
 
 /** 全部排序方式的文案, 按下标取值(与 Legado 的 bookshelfSort 一一对应)。
@@ -77,6 +80,7 @@ const BOOK_SORT_LABEL_BY_VALUE = [
   '手动排序',
   '综合',
   '作者',
+  '加入时间',
 ] as const
 
 /** 排序值 → 文案。用于下拉触发器显示当前选择。 */
@@ -89,7 +93,7 @@ export function bookSortLabel(value: number): string {
  *  「手动排序」已从菜单移除, 但它仍需参与排序计算(见 `sortBooks`), 所以
  *  `normalizeBookSort` 继续认它。而**展示用的**设置必须迁移: 否则偏好停在 3
  *  的用户会卡在一个菜单里选不出来的状态 —— 书架按 order 排、拖拽可用, 但一旦
- *  切到别的排序就再也回不去。菜单只暴露五种, 设置也收敛到这五种。 */
+ *  切到别的排序就再也回不去。 */
 export function toAvailableBookSort(value: unknown): number {
   const sort = normalizeBookSort(value)
   return sort === BOOK_SORT_KEYS.manual ? DEFAULT_BOOK_SORT : sort
@@ -104,7 +108,7 @@ export function isRetiredBookSort(value: number): boolean {
 export const DEFAULT_BOOK_SORT = BOOK_SORT_KEYS.recent
 
 /** 排序值的合法范围。手动排序(3)仍算合法, 只是不出现在菜单里。 */
-const MAX_BOOK_SORT = BOOK_SORT_KEYS.author
+const MAX_BOOK_SORT = BOOK_SORT_KEYS.addedAt
 
 /** 时间字段归一化到**毫秒**。
  *
@@ -127,6 +131,10 @@ function latestUpdateOf(book: SortableBook): number {
 
 function lastReadOf(book: SortableBook): number {
   return toMillis(book.durChapterTime)
+}
+
+function addedAtOf(book: SortableBook): number {
+  return toMillis(book.addedAt)
 }
 
 /** 缺省 order 的书的统一排序键: 比任何现实 order 都大, 但彼此相等,
@@ -161,6 +169,18 @@ function compareDesc(a: number, b: number): number {
  *  这类多级意图变得不可预测。 */
 export function sortBooks<T extends SortableBook>(books: T[], mode: number): T[] {
   const sort = normalizeBookSort(mode)
+  if (sort === BOOK_SORT_KEYS.addedAt) {
+    // 书架默认按加入顺序追加存储，新加入的书在数组末尾；优先按 addedAt 降序，
+    // 缺失 addedAt 时按入参倒序，确保最新加入书架的书排在最前。
+    const indexed = books.map((book, idx) => ({ book, idx }))
+    indexed.sort((a, b) => {
+      const diff = compareDesc(addedAtOf(a.book), addedAtOf(b.book))
+      if (diff !== 0) return diff
+      return b.idx - a.idx
+    })
+    return indexed.map((entry) => entry.book)
+  }
+
   const ordered = books.slice().sort((a, b) => {
     switch (sort) {
       case 1:

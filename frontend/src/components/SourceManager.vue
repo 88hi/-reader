@@ -51,6 +51,7 @@
             :has-sources="filteredSources.length > 0"
             @update:filter-text="filterText = $event"
             @update:filter-group="filterGroup = $event"
+            @manage-groups="openGroupManagerModal"
             @toggle-current-selection="toggleFilteredSelection"
             @delete-selection="removeSelectedSources"
             @more-selection="handleSelectionMore"
@@ -123,6 +124,71 @@
       @confirm="handleGroupPromptConfirm"
       @close="closeGroupPrompt"
     />
+
+    <!-- 书源分组管理弹窗：支持重命名与删除分组 -->
+    <div
+      v-if="groupManagerVisible"
+      class="group-manager-overlay"
+      @click.self="closeGroupManagerModal"
+    >
+      <div class="group-manager-dialog" role="dialog" aria-modal="true" aria-label="管理书源分组">
+        <div class="group-manager-header">
+          <h3>管理书源分组</h3>
+          <button type="button" class="mini-btn" @click="closeGroupManagerModal">✕</button>
+        </div>
+        <div v-if="groupSummaries.length === 0" class="group-manager-empty">
+          暂无书源分组
+        </div>
+        <div v-else class="group-manager-list">
+          <div v-for="item in groupSummaries" :key="item.name" class="group-manager-row">
+            <template v-if="renamingGroupName === item.name">
+              <input
+                v-model="renameGroupDraft"
+                type="text"
+                class="group-rename-input"
+                placeholder="输入新分组名..."
+                @keydown.enter.prevent="confirmRenameGroup(item.name)"
+                @keydown.esc.prevent="cancelRenameGroup"
+              />
+              <div class="group-manager-actions">
+                <button
+                  type="button"
+                  class="mini-btn primary"
+                  :disabled="groupManagerSaving"
+                  @click="confirmRenameGroup(item.name)"
+                >保存</button>
+                <button
+                  type="button"
+                  class="mini-btn"
+                  :disabled="groupManagerSaving"
+                  @click="cancelRenameGroup"
+                >取消</button>
+              </div>
+            </template>
+            <template v-else>
+              <div class="group-manager-info">
+                <span class="group-manager-name">{{ item.name }}</span>
+                <span class="group-manager-count">{{ item.count }} 个书源</span>
+              </div>
+              <div class="group-manager-actions">
+                <button
+                  type="button"
+                  class="mini-btn"
+                  :disabled="groupManagerSaving"
+                  @click="startRenameGroup(item.name)"
+                >修改名称</button>
+                <button
+                  type="button"
+                  class="mini-btn danger"
+                  :disabled="groupManagerSaving"
+                  @click="deleteSourceGroup(item.name)"
+                >删除分组</button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
   </Teleport>
 </template>
 
@@ -528,6 +594,124 @@ async function verifySourceCloudflare(source: BookSource) {
     )
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '打开 Cloudflare 验证窗口失败', 'error')
+  }
+}
+
+const groupManagerVisible = ref(false)
+const renamingGroupName = ref('')
+const renameGroupDraft = ref('')
+const groupManagerSaving = ref(false)
+
+function splitSourceGroupParts(raw?: string): string[] {
+  return (raw || '')
+    .split(/[;,，；、|/]/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+}
+
+const groupSummaries = computed(() => {
+  const counts = new Map<string, number>()
+  for (const source of sources.value) {
+    const uniqueParts = new Set(splitSourceGroupParts(source.bookSourceGroup))
+    for (const group of uniqueParts) {
+      counts.set(group, (counts.get(group) || 0) + 1)
+    }
+  }
+  return Array.from(counts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+})
+
+function openGroupManagerModal() {
+  renamingGroupName.value = ''
+  renameGroupDraft.value = ''
+  groupManagerVisible.value = true
+}
+
+function closeGroupManagerModal() {
+  if (groupManagerSaving.value) return
+  groupManagerVisible.value = false
+  renamingGroupName.value = ''
+  renameGroupDraft.value = ''
+}
+
+function startRenameGroup(name: string) {
+  renamingGroupName.value = name
+  renameGroupDraft.value = name
+}
+
+function cancelRenameGroup() {
+  renamingGroupName.value = ''
+  renameGroupDraft.value = ''
+}
+
+async function confirmRenameGroup(oldName: string) {
+  const nextName = renameGroupDraft.value.trim()
+  if (!nextName) {
+    appStore.showToast('新分组名不能为空', 'warning')
+    return
+  }
+  if (nextName === oldName) {
+    cancelRenameGroup()
+    return
+  }
+  const affected: BookSource[] = []
+  for (const source of sources.value) {
+    const parts = splitSourceGroupParts(source.bookSourceGroup)
+    if (!parts.includes(oldName)) continue
+    const replaced = Array.from(new Set(parts.map((p) => (p === oldName ? nextName : p))))
+    affected.push({ ...source, bookSourceGroup: replaced.join(',') })
+  }
+  if (!affected.length) {
+    cancelRenameGroup()
+    return
+  }
+  groupManagerSaving.value = true
+  try {
+    await saveBookSources(affected)
+    const updatedMap = new Map(affected.map((s) => [s.bookSourceUrl, s]))
+    sources.value = sources.value.map((s) => updatedMap.get(s.bookSourceUrl) ?? s)
+    if (filterGroup.value === oldName) {
+      filterGroup.value = nextName
+    }
+    await sourceStore.fetchSources(true).catch(() => undefined)
+    appStore.showToast(`已将分组「${oldName}」修改为「${nextName}」（共 ${affected.length} 个书源）`, 'success')
+    cancelRenameGroup()
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '修改分组名失败', 'error')
+  } finally {
+    groupManagerSaving.value = false
+  }
+}
+
+async function deleteSourceGroup(groupName: string) {
+  const affected: BookSource[] = []
+  for (const source of sources.value) {
+    const parts = splitSourceGroupParts(source.bookSourceGroup)
+    if (!parts.includes(groupName)) continue
+    const remaining = parts.filter((p) => p !== groupName)
+    affected.push({ ...source, bookSourceGroup: remaining.join(',') })
+  }
+  if (!affected.length) return
+  const ok = await appStore.confirmDialog(
+    `确定删除分组「${groupName}」？这只会移除 ${affected.length} 个书源上的该分组标签，不会删除书源本身。`,
+    { title: '删除书源分组', danger: true },
+  )
+  if (!ok) return
+  groupManagerSaving.value = true
+  try {
+    await saveBookSources(affected)
+    const updatedMap = new Map(affected.map((s) => [s.bookSourceUrl, s]))
+    sources.value = sources.value.map((s) => updatedMap.get(s.bookSourceUrl) ?? s)
+    if (filterGroup.value === groupName) {
+      filterGroup.value = ''
+    }
+    await sourceStore.fetchSources(true).catch(() => undefined)
+    appStore.showToast(`已删除分组「${groupName}」`, 'success')
+  } catch (e: unknown) {
+    appStore.showToast((e as Error).message || '删除分组失败', 'error')
+  } finally {
+    groupManagerSaving.value = false
   }
 }
 
@@ -1246,5 +1430,146 @@ watch(() => props.modelValue, (v) => {
   .source-modal {
     border-radius: var(--radius-lg);
   }
+}
+
+.group-manager-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-modal) + 30);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.48);
+  backdrop-filter: blur(4px);
+}
+
+.group-manager-dialog {
+  width: min(480px, 100%);
+  max-height: min(76vh, 560px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-xl);
+}
+
+.group-manager-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.group-manager-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.group-manager-empty {
+  padding: 28px 12px;
+  text-align: center;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+}
+
+.group-manager-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.group-manager-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg);
+}
+
+.group-manager-info {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.group-manager-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-manager-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.group-rename-input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-primary);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.group-rename-input:focus {
+  outline: none;
+}
+
+.group-manager-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.group-manager-dialog .mini-btn {
+  padding: 4px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.group-manager-dialog .mini-btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.group-manager-dialog .mini-btn.primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+.group-manager-dialog .mini-btn.danger {
+  color: var(--color-danger);
+  border-color: color-mix(in srgb, var(--color-danger) 40%, var(--color-border));
+}
+
+.group-manager-dialog .mini-btn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
 }
 </style>

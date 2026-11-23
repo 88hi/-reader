@@ -30,6 +30,15 @@
       <option value="">全部分组</option>
       <option v-for="group in groups" :key="group" :value="group">{{ group }}</option>
     </select>
+    <button
+      class="mini-btn"
+      type="button"
+      title="修改或删除书源分组"
+      :disabled="!groups.length"
+      @click="$emit('manage-groups')"
+    >
+      管理分组
+    </button>
     <div v-if="selectedCount > 0" class="selection-tools">
       <span>已选 {{ selectedCount }}</span>
       <button class="mini-btn danger" type="button" @click="$emit('delete-selection')">删除选中</button>
@@ -57,6 +66,7 @@ defineProps<{
 defineEmits<{
   'update:filterText': [value: string]
   'update:filterGroup': [value: string]
+  'manage-groups': []
   'toggle-current-selection': []
   'delete-selection': []
   'more-selection': [event: MouseEvent]
