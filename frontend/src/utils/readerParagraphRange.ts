@@ -5,12 +5,17 @@ const ATOMIC_ELEMENTS = new Set([
 
 interface Boundary { node: Node; offset: number }
 
-/** A paragraph can be split only between characters or complete media nodes. */
+const SPLITTABLE_BLOCK_TAGS = new Set([
+  'P', 'DIV', 'SECTION', 'ARTICLE', 'BLOCKQUOTE',
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+])
+
+/** A paragraph or block container can be split only between characters or complete media nodes. */
 export function parseReaderParagraph(html: string) {
   const root = document.createElement('div')
   root.innerHTML = html
   const paragraph = root.firstElementChild
-  if (!(paragraph instanceof HTMLParagraphElement)) return null
+  if (!(paragraph instanceof HTMLElement) || !SPLITTABLE_BLOCK_TAGS.has(paragraph.tagName)) return null
 
   const tokens: string[] = []
   const boundaries: Boundary[] = []
@@ -47,7 +52,7 @@ export function parseReaderParagraph(html: string) {
         : boundaries[end - 1]
       range.setStart(first.node, first.offset)
       range.setEnd(last.node, last.offset)
-      const segment = paragraph.cloneNode(false) as HTMLParagraphElement
+      const segment = paragraph.cloneNode(false) as HTMLElement
       segment.appendChild(range.cloneContents())
       if (style) segment.setAttribute('style', style)
       else segment.removeAttribute('style')

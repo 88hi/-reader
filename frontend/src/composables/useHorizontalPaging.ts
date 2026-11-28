@@ -512,6 +512,8 @@ export function useHorizontalPaging(
     const blocks: string[] = []
     let inline: Node[] = []
     const blockTags = new Set(['DIV', 'SECTION', 'ARTICLE', 'BLOCKQUOTE', 'UL', 'OL', 'TABLE', 'PRE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'])
+    const containerTags = new Set(['DIV', 'SECTION', 'ARTICLE'])
+    const nestedBlockSelector = 'p, div, section, article, blockquote, ul, ol, table, pre, h1, h2, h3, h4, h5, h6'
     const flushInline = () => {
       if (inline.some((node) => node instanceof Element || (node.textContent || '').trim())) {
         const paragraph = document.createElement('p')
@@ -520,12 +522,41 @@ export function useHorizontalPaging(
       }
       inline = []
     }
+    const splitContainerAtBreaks = (container: Element) => {
+      const style = filterBlockStyle(container.getAttribute('style') || '')
+      let seg: Node[] = []
+      const result: string[] = []
+      const flushSeg = () => {
+        if (!seg.some((node) => node instanceof Element || (node.textContent || '').trim())) {
+          seg = []
+          return
+        }
+        const paragraph = document.createElement('p')
+        seg.forEach((node) => paragraph.appendChild(node.cloneNode(true)))
+        if (style) paragraph.setAttribute('style', style)
+        if (config.value.firstLineIndent) paragraph.classList.add('reader-indent')
+        result.push(normalizeParagraphHtml(paragraph.outerHTML))
+        seg = []
+      }
+      container.childNodes.forEach((child) => {
+        if (child instanceof Element && child.tagName === 'BR') {
+          flushSeg()
+        } else {
+          seg.push(child)
+        }
+      })
+      flushSeg()
+      return result
+    }
     const visit = (node: Node) => {
       if (!(node instanceof Element)) { inline.push(node); return }
       if (node.tagName === 'P') {
         flushInline()
         blocks.push(normalizeParagraphHtml(node.outerHTML))
-      } else if (node.querySelector('p')) {
+      } else if (
+        node.querySelector('p')
+        || (containerTags.has(node.tagName) && node.querySelector(nestedBlockSelector))
+      ) {
         flushInline()
         node.childNodes.forEach(visit)
         flushInline()
@@ -535,6 +566,8 @@ export function useHorizontalPaging(
         const split = splitBlockAtMedia(node)
         if (split) {
           blocks.push(...split)
+        } else if (containerTags.has(node.tagName) && node.querySelector('br')) {
+          blocks.push(...splitContainerAtBreaks(node))
         } else {
           blocks.push(node.outerHTML)
         }
