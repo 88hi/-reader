@@ -12,6 +12,10 @@ class MockNode {
   }
 
   appendChild(child: MockNode) {
+    if (child.nodeType === 11) {
+      child.childNodes.forEach((c) => this.appendChild(c))
+      return child
+    }
     child.parentNode = this as unknown as MockElement
     this.childNodes.push(child)
     return child
